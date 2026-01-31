@@ -11,7 +11,6 @@ import {
   Legend,
 } from "recharts";
 
-const KEY_START_BALANCE = "100x_start_balance";
 const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -23,15 +22,7 @@ const OVERLAY_COLORS = [
   "#29b6f6", "#26c6da", "#26a69a", "#66bb6a", "#9ccc65", "#d4e157",
 ];
 
-async function loadFromStorage(key) {
-  if (key === KEY_START_BALANCE) {
-    try {
-      const saved = localStorage.getItem(KEY_START_BALANCE);
-      return saved ? JSON.parse(saved) : null;
-    } catch (e) {
-      return null;
-    }
-  }
+async function loadFromStorage() {
   const res = await fetch(
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0RCmN9uf0TXrcan5bx33Yp-M_SP4KGF1mXBU_q_pc1YCjZMlFI30GjnPrP-fSJbKtY8vUZFRmqaZx/pub?gid=148955930&single=true&output=csv"
   );
@@ -39,19 +30,8 @@ async function loadFromStorage(key) {
   return parseCSV(text);
 }
 
-async function saveToStorage(key, val) {
-  try {
-    localStorage.setItem(key, JSON.stringify(val));
-  } catch (e) {
-    console.error(e);
-  }
-}
-
 function parseCSV(text) {
-  const lines = text
-    .trim()
-    .split("\n")
-    .filter((l) => l.trim().length > 0);
+  const lines = text.trim().split("\n").filter((l) => l.trim().length > 0);
   if (lines.length < 2) return [];
   
   const splitRow = (line) => {
@@ -106,18 +86,21 @@ function fmt(n) {
   });
 }
 
+// NEW: Helper to format date nicely (e.g. "Jan 31")
+function formatDatePretty(dateStr) {
+  if (!dateStr || dateStr.includes("Start")) return dateStr;
+  const d = new Date(dateStr);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 export default function PortfolioTracker() {
   const [entries, setEntries] = useState([]);
-  const [startBalance, setStartBalance] = useState(0);
   const [view, setView] = useState("overall"); 
-  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     (async () => {
       const e = await loadFromStorage();
       if (e) setEntries(e);
-      const sb = await loadFromStorage(KEY_START_BALANCE);
-      if (sb) setStartBalance(sb);
     })();
   }, []);
 
@@ -127,8 +110,8 @@ export default function PortfolioTracker() {
   );
 
   const effectiveStart = useMemo(
-    () => (startBalance > 0 ? startBalance : sortedEntries.length ? sortedEntries[0].balance : 0),
-    [startBalance, sortedEntries]
+    () => (sortedEntries.length ? sortedEntries[0].balance : 0),
+    [sortedEntries]
   );
 
   // --- CHART DATA GENERATION ---
@@ -156,7 +139,7 @@ export default function PortfolioTracker() {
     // 2. OVERALL & 100X VIEW
     if (view === "overall" || view === "100x") {
       return sortedEntries.map((e) => ({
-        label: e.date.slice(5),
+        label: formatDatePretty(e.date), // UPDATED: Cleaner Date
         date: e.date,
         balance: e.balance,
         profit:
@@ -178,22 +161,20 @@ export default function PortfolioTracker() {
     const prevEntry =
       firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
     
-    // The baseline is the previous month's close (if it exists), otherwise the first entry of this month
     const baseline = prevEntry ? prevEntry.balance : me[0].balance;
 
     const data = me.map((e) => ({
-      label: e.date.slice(8), // DD
+      label: e.date.slice(8), // Just Day number for month view
       date: e.date,
       balance: e.balance,
       profit: baseline > 0 ? ((e.balance - baseline) / baseline) * 100 : 0,
       multiplier: baseline > 0 ? e.balance / baseline : 1,
     }));
 
-    // Add the "Ghost" entry to the start of the chart so the line starts from the left
     if (prevEntry) {
       data.unshift({
         label: "Start", 
-        date: prevEntry.date + " (Prev Close)",
+        date: prevEntry.date,
         balance: prevEntry.balance,
         profit: 0,
         multiplier: 1,
@@ -249,17 +230,6 @@ export default function PortfolioTracker() {
     return s;
   }, [sortedEntries]);
 
-  // Settings Logic
-  const [settStart, setSettStart] = useState(startBalance ? startBalance.toString() : "");
-  useEffect(() => { setSettStart(startBalance ? startBalance.toString() : ""); }, [startBalance]);
-  
-  const saveSettings = async () => {
-    const sb = parseFloat(settStart.replace(/[$,]/g, "")) || 0;
-    setStartBalance(sb);
-    await saveToStorage(KEY_START_BALANCE, sb);
-    setSettingsOpen(false);
-  };
-
   const lastProfit = chartData.length && view !== 'overlay' ? chartData[chartData.length - 1].profit : 0;
   const areaColor = lastProfit >= 0 ? "#4caf7c" : "#e05555";
 
@@ -287,12 +257,10 @@ export default function PortfolioTracker() {
     const d = payload[0]?.payload;
     if (!d) return null;
     
-    // Calculate PnL based on view context
     let base;
     if (view === 'overall' || view === '100x') {
        base = effectiveStart;
     } else {
-       // For monthly view, base is the balance of the FIRST data point (which is now the ghost entry)
        base = chartData[0]?.balance || d.balance; 
     }
 
@@ -305,7 +273,7 @@ export default function PortfolioTracker() {
         border: "1px solid #2a2a3a", borderRadius: 8, padding: "10px 14px",
         boxShadow: "0 4px 24px rgba(0,0,0,0.6)", minWidth: 175,
       }}>
-        <div style={{ color: "#555", fontSize: 11, marginBottom: 5, fontFamily: "'Courier New',monospace" }}>{d.date}</div>
+        <div style={{ color: "#555", fontSize: 11, marginBottom: 5, fontFamily: "'Courier New',monospace" }}>{formatDatePretty(d.date)}</div>
         <div style={{ color: "#e8e8e8", fontSize: 14, fontWeight: 600, marginBottom: 3 }}>${fmt(d.balance)}</div>
         <div style={{ color: pos ? "#4caf7c" : "#e05555", fontSize: 12 }}>
           {pos ? "+" : ""}${fmt(pnl)} ({pos ? "+" : ""}{d.profit.toFixed(2)}%)
@@ -314,17 +282,6 @@ export default function PortfolioTracker() {
       </div>
     );
   };
-
-  const Backdrop = ({ onClick, children }) => (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClick}>
-      <div onClick={(e) => e.stopPropagation()}>{children}</div>
-    </div>
-  );
-  const Modal = ({ style, children }) => (
-    <div style={{ background: "#16161e", border: "1px solid #2a2a3a", borderRadius: 12, padding: 28, boxShadow: "0 16px 48px rgba(0,0,0,0.6)", ...style }}>
-      {children}
-    </div>
-  );
 
   return (
     <div style={{ background: "#0e0e14", minHeight: "100vh", padding: "28px 16px 24px", fontFamily: "'Segoe UI',sans-serif", color: "#ccc" }}>
@@ -335,10 +292,9 @@ export default function PortfolioTracker() {
           <div>
             <h1 style={{ fontSize: 22, fontWeight: 700, color: "#e8e8e8", margin: 0, letterSpacing: "-0.5px" }}>100x Challenge</h1>
             <span style={{ fontSize: 11, color: "#444" }}>
-              {effectiveStart > 0 ? `Starting: $${fmt(effectiveStart)} · Target: $${fmt(effectiveStart * 100)}` : "Set a starting balance in ⚙ Settings"}
+              {effectiveStart > 0 ? `Starting: $${fmt(effectiveStart)} · Target: $${fmt(effectiveStart * 100)}` : "Loading..."}
             </span>
           </div>
-          <button onClick={() => setSettingsOpen(true)} style={{ background: "#1a1a24", border: "1px solid #2a2a3a", borderRadius: 6, color: "#666", padding: "5px 10px", fontSize: 14, cursor: "pointer" }}>⚙</button>
         </div>
 
         {/* TOP STATS */}
@@ -352,7 +308,7 @@ export default function PortfolioTracker() {
             <span style={{ fontSize: 11, color: "#555" }}>{stats.overallMulti.toFixed(2)}x</span>
           </div>
           
-           {/* Month Stats (Only show if viewing a specific month) */}
+           {/* Month Stats */}
            {view !== "overall" && view !== "100x" && view !== "overlay" && (
             <>
               <div style={{ width: 1, height: 18, background: "#2a2a3a" }} />
@@ -399,7 +355,6 @@ export default function PortfolioTracker() {
 
         {/* VIEW CONTROLS */}
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
-          {/* Main Views */}
           <button onClick={() => setView("overall")}
             style={{
               background: view === "overall" ? "#5b9bd520" : "#1a1a24",
@@ -426,7 +381,6 @@ export default function PortfolioTracker() {
 
           <div style={{ width: 1, height: 22, background: "#2a2a3a", margin: "0 4px" }} />
 
-          {/* Month Selectors */}
           {MONTHS.map((m, i) => {
             const has = monthsWithData.has(i), active = view === String(i);
             return (
@@ -517,7 +471,7 @@ export default function PortfolioTracker() {
           )}
         </div>
 
-        {/* RECENT ENTRIES LIST (Read Only) */}
+        {/* RECENT ENTRIES LIST */}
         {sortedEntries.length > 0 && (
           <div style={{ marginTop: 20 }}>
             <div style={{ fontSize: 11, color: "#444", marginBottom: 8, fontWeight: 600, letterSpacing: "0.5px", textTransform: "uppercase" }}>
@@ -531,7 +485,7 @@ export default function PortfolioTracker() {
                 const pos = change !== null && change >= 0;
                 return (
                   <div key={e.date} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 12px", borderBottom: i < 19 ? "1px solid #1a1a24" : "none", background: i % 2 === 0 ? "#111118" : "#0e0e14" }}>
-                    <span style={{ color: "#666", fontSize: 12, fontFamily: "'Courier New',monospace" }}>{e.date}</span>
+                    <span style={{ color: "#666", fontSize: 12, fontFamily: "'Courier New',monospace" }}>{formatDatePretty(e.date)}</span>
                     <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
                       {change !== null && (
                         <span style={{ fontSize: 11, color: pos ? "#4caf7c" : "#e05555" }}>
@@ -547,31 +501,6 @@ export default function PortfolioTracker() {
           </div>
         )}
       </div>
-
-      {/* SETTINGS MODAL */}
-      {settingsOpen && (
-        <Backdrop onClick={() => setSettingsOpen(false)}>
-          <Modal style={{ width: 380 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-              <h3 style={{ margin: 0, color: "#e8e8e8", fontSize: 16, fontWeight: 600 }}>Settings</h3>
-              <button onClick={() => setSettingsOpen(false)} style={{ background: "none", border: "none", color: "#555", fontSize: 20, cursor: "pointer" }}>×</button>
-            </div>
-            <label style={{ fontSize: 11, color: "#555", display: "block", marginBottom: 4, textTransform: "uppercase" }}>Starting Balance ($)</label>
-            <p style={{ fontSize: 10.5, color: "#3a3a4a", margin: "0 0 6px", lineHeight: 1.5 }}>
-              The amount you're starting the 100x challenge with.
-            </p>
-            <input
-              type="text" placeholder="e.g. 1000" value={settStart}
-              onChange={(e) => setSettStart(e.target.value)}
-              style={{ width: "100%", background: "#111118", border: "1px solid #2a2a3a", borderRadius: 6, color: "#e8e8e8", padding: "8px 10px", fontSize: 13, marginBottom: 24 }}
-            />
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={saveSettings} style={{ flex: 1, background: "#5b9bd5", border: "none", borderRadius: 6, color: "#fff", padding: "9px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Save</button>
-              <button onClick={() => setSettingsOpen(false)} style={{ flex: 0.4, background: "#1a1a24", border: "1px solid #2a2a3a", borderRadius: 6, color: "#666", padding: "9px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
-            </div>
-          </Modal>
-        </Backdrop>
-      )}
     </div>
   );
 }
