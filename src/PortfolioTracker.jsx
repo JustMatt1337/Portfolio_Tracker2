@@ -24,8 +24,8 @@ const OVERLAY_COLORS = [
 
 async function loadFromStorage() {
   const res = await fetch(
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0RCmN9uf0TXrcan5bx33Yp-M_SP4KGF1mXBU_q_pc1YCjZMlFI30GjnPrP-fSJbKtY8vUZFRmqaZx/pub?gid=148955930&single=true&output=csv"
-  );
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0RCmN9uf0TXrcan5bx33Yp-M_SP4KGF1mXBU_q_pc1YCjZMlFI30GjnPrP-fSJbKtY8vUZFRmqaZx/pub?gid=148955930&single=true&output=csv&t=" + Date.now()
+);
   const text = await res.text();
   return parseCSV(text);
 }
@@ -504,3 +504,4 @@ export default function PortfolioTracker() {
     </div>
   );
 }
+
