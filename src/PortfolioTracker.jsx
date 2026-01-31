@@ -135,82 +135,119 @@ export default function PortfolioTracker() {
     [startBalance, sortedEntries]
   );
 
-  // --- CHART DATA GENERATION ---
+// --- CHART DATA GENERATION ---
   const chartData = useMemo(() => {
     if (!sortedEntries.length) return [];
 
     // 1. OVERLAY VIEW: Group data by day of month (1-31)
     if (view === "overlay") {
-      const dayMap = new Map(); // Key: "01", "02" ... Value: { day: "01", Jan: 100, Feb: 120 }
-      
-      sortedEntries.forEach(e => {
+      const dayMap = new Map();
+      sortedEntries.forEach((e) => {
         const dObj = new Date(e.date + "T00:00:00");
-        const dayKey = String(dObj.getDate()).padStart(2, '0');
+        const dayKey = String(dObj.getDate()).padStart(2, "0");
         const monthName = MONTHS[dObj.getMonth()];
-        
+
         if (!dayMap.has(dayKey)) {
           dayMap.set(dayKey, { label: dayKey });
         }
         dayMap.get(dayKey)[monthName] = e.balance;
       });
-
-      // Convert map to sorted array
-      return Array.from(dayMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+      return Array.from(dayMap.values()).sort((a, b) =>
+        a.label.localeCompare(b.label)
+      );
     }
 
     // 2. OVERALL & 100X VIEW
     if (view === "overall" || view === "100x") {
       return sortedEntries.map((e) => ({
-        label: e.date.slice(5), // MM-DD
+        label: e.date.slice(5),
         date: e.date,
         balance: e.balance,
-        profit: effectiveStart > 0 ? ((e.balance - effectiveStart) / effectiveStart) * 100 : 0,
+        profit:
+          effectiveStart > 0
+            ? ((e.balance - effectiveStart) / effectiveStart) * 100
+            : 0,
         multiplier: effectiveStart > 0 ? e.balance / effectiveStart : 1,
       }));
     }
 
-    // 3. SINGLE MONTH VIEW
+    // 3. SINGLE MONTH VIEW (With "Ghost" Start Entry)
     const mi = parseInt(view);
     const me = sortedEntries.filter(
       (e) => new Date(e.date + "T00:00:00").getMonth() === mi
     );
     if (!me.length) return [];
-    const ms = me[0].balance;
-    return me.map((e) => ({
+
+    // Logic: Find the entry immediately before this month started
+    const firstEntryIdx = sortedEntries.indexOf(me[0]);
+    const prevEntry =
+      firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
+    
+    // The baseline is the previous month's close (if it exists), otherwise the first entry of this month
+    const baseline = prevEntry ? prevEntry.balance : me[0].balance;
+
+    const data = me.map((e) => ({
       label: e.date.slice(8), // DD
       date: e.date,
       balance: e.balance,
-      profit: ms > 0 ? ((e.balance - ms) / ms) * 100 : 0,
-      multiplier: ms > 0 ? e.balance / ms : 1,
+      profit: baseline > 0 ? ((e.balance - baseline) / baseline) * 100 : 0,
+      multiplier: baseline > 0 ? e.balance / baseline : 1,
     }));
-  }, [sortedEntries, view, effectiveStart]);
 
-  // --- STATISTICS ---
+    // Add the "Ghost" entry to the start of the chart so the line starts from the left
+    if (prevEntry) {
+      data.unshift({
+        label: "Start", 
+        date: prevEntry.date + " (Prev Close)",
+        balance: prevEntry.balance,
+        profit: 0,
+        multiplier: 1,
+      });
+    }
+
+    return data;
+  }, [sortedEntries, view, effectiveStart]);
+// --- STATISTICS ---
   const stats = useMemo(() => {
-    const last = sortedEntries.length ? sortedEntries[sortedEntries.length - 1] : null;
-    const overallPnl = last && effectiveStart ? last.balance - effectiveStart : 0;
-    const overallPct = effectiveStart > 0 ? (overallPnl / effectiveStart) * 100 : 0;
-    const overallMulti = effectiveStart > 0 && last ? last.balance / effectiveStart : 0;
+    const last = sortedEntries.length
+      ? sortedEntries[sortedEntries.length - 1]
+      : null;
+    const overallPnl =
+      last && effectiveStart ? last.balance - effectiveStart : 0;
+    const overallPct =
+      effectiveStart > 0 ? (overallPnl / effectiveStart) * 100 : 0;
+    const overallMulti =
+      effectiveStart > 0 && last ? last.balance / effectiveStart : 0;
+
+    let monthPnl = 0,
+      monthPct = 0;
     
-    let monthPnl = 0, monthPct = 0;
-    // Calculate specific month stats if viewing single month
+    // Calculate specific month stats
     if (view !== "overall" && view !== "100x" && view !== "overlay") {
       const mi = parseInt(view);
-      const me = sortedEntries.filter((e) => new Date(e.date + "T00:00:00").getMonth() === mi);
+      const me = sortedEntries.filter(
+        (e) => new Date(e.date + "T00:00:00").getMonth() === mi
+      );
       if (me.length) {
-        monthPnl = me[me.length - 1].balance - me[0].balance;
-        monthPct = me[0].balance > 0 ? (monthPnl / me[0].balance) * 100 : 0;
+        // Use previous month's close as the baseline for accurate P&L
+        const firstEntryIdx = sortedEntries.indexOf(me[0]);
+        const prevEntry =
+          firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
+        const startBalance = prevEntry ? prevEntry.balance : me[0].balance;
+
+        monthPnl = me[me.length - 1].balance - startBalance;
+        monthPct = startBalance > 0 ? (monthPnl / startBalance) * 100 : 0;
       }
     }
-    return { overallPnl, overallPct, overallMulti, monthPnl, monthPct, currentBalance: last?.balance ?? 0 };
+    return {
+      overallPnl,
+      overallPct,
+      overallMulti,
+      monthPnl,
+      monthPct,
+      currentBalance: last?.balance ?? 0,
+    };
   }, [sortedEntries, effectiveStart, view]);
-
-  const monthsWithData = useMemo(() => {
-    const s = new Set();
-    sortedEntries.forEach((e) => s.add(new Date(e.date + "T00:00:00").getMonth()));
-    return s;
-  }, [sortedEntries]);
-
   // Settings Logic
   const [settStart, setSettStart] = useState(startBalance ? startBalance.toString() : "");
   useEffect(() => { setSettStart(startBalance ? startBalance.toString() : ""); }, [startBalance]);
@@ -510,4 +547,5 @@ export default function PortfolioTracker() {
     </div>
   );
 }
+
 
