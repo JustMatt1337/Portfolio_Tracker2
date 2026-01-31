@@ -24,7 +24,6 @@ const OVERLAY_COLORS = [
 ];
 
 async function loadFromStorage(key) {
-  // If requesting start balance, try local storage first
   if (key === KEY_START_BALANCE) {
     try {
       const saved = localStorage.getItem(KEY_START_BALANCE);
@@ -33,7 +32,6 @@ async function loadFromStorage(key) {
       return null;
     }
   }
-  // Otherwise fetch the sheet
   const res = await fetch(
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0RCmN9uf0TXrcan5bx33Yp-M_SP4KGF1mXBU_q_pc1YCjZMlFI30GjnPrP-fSJbKtY8vUZFRmqaZx/pub?gid=148955930&single=true&output=csv"
   );
@@ -79,7 +77,6 @@ function parseCSV(text) {
     let dateStr = cols[0].replace(/"/g, "").trim();
     let date = new Date(dateStr);
     
-    // Fallback date parsing
     if (isNaN(date.getTime())) {
       const parts = dateStr.split(/[\/\-\.]/);
       if (parts.length === 3) {
@@ -112,10 +109,9 @@ function fmt(n) {
 export default function PortfolioTracker() {
   const [entries, setEntries] = useState([]);
   const [startBalance, setStartBalance] = useState(0);
-  const [view, setView] = useState("overall"); // "overall", "100x", "overlay", or month index
+  const [view, setView] = useState("overall"); 
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Initial Load
   useEffect(() => {
     (async () => {
       const e = await loadFromStorage();
@@ -135,11 +131,11 @@ export default function PortfolioTracker() {
     [startBalance, sortedEntries]
   );
 
-// --- CHART DATA GENERATION ---
+  // --- CHART DATA GENERATION ---
   const chartData = useMemo(() => {
     if (!sortedEntries.length) return [];
 
-    // 1. OVERLAY VIEW: Group data by day of month (1-31)
+    // 1. OVERLAY VIEW
     if (view === "overlay") {
       const dayMap = new Map();
       sortedEntries.forEach((e) => {
@@ -171,14 +167,13 @@ export default function PortfolioTracker() {
       }));
     }
 
-    // 3. SINGLE MONTH VIEW (With "Ghost" Start Entry)
+    // 3. SINGLE MONTH VIEW (With Ghost Entry)
     const mi = parseInt(view);
     const me = sortedEntries.filter(
       (e) => new Date(e.date + "T00:00:00").getMonth() === mi
     );
     if (!me.length) return [];
 
-    // Logic: Find the entry immediately before this month started
     const firstEntryIdx = sortedEntries.indexOf(me[0]);
     const prevEntry =
       firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
@@ -207,7 +202,8 @@ export default function PortfolioTracker() {
 
     return data;
   }, [sortedEntries, view, effectiveStart]);
-// --- STATISTICS ---
+
+  // --- STATISTICS ---
   const stats = useMemo(() => {
     const last = sortedEntries.length
       ? sortedEntries[sortedEntries.length - 1]
@@ -222,14 +218,12 @@ export default function PortfolioTracker() {
     let monthPnl = 0,
       monthPct = 0;
     
-    // Calculate specific month stats
     if (view !== "overall" && view !== "100x" && view !== "overlay") {
       const mi = parseInt(view);
       const me = sortedEntries.filter(
         (e) => new Date(e.date + "T00:00:00").getMonth() === mi
       );
       if (me.length) {
-        // Use previous month's close as the baseline for accurate P&L
         const firstEntryIdx = sortedEntries.indexOf(me[0]);
         const prevEntry =
           firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
@@ -248,6 +242,13 @@ export default function PortfolioTracker() {
       currentBalance: last?.balance ?? 0,
     };
   }, [sortedEntries, effectiveStart, view]);
+
+  const monthsWithData = useMemo(() => {
+    const s = new Set();
+    sortedEntries.forEach((e) => s.add(new Date(e.date + "T00:00:00").getMonth()));
+    return s;
+  }, [sortedEntries]);
+
   // Settings Logic
   const [settStart, setSettStart] = useState(startBalance ? startBalance.toString() : "");
   useEffect(() => { setSettStart(startBalance ? startBalance.toString() : ""); }, [startBalance]);
@@ -266,7 +267,6 @@ export default function PortfolioTracker() {
   const CustomTooltip = ({ active, payload, label }) => {
     if (!active || !payload?.length) return null;
 
-    // Overlay View Tooltip
     if (view === "overlay") {
       return (
         <div style={{
@@ -284,10 +284,18 @@ export default function PortfolioTracker() {
       );
     }
 
-    // Standard View Tooltip
     const d = payload[0]?.payload;
     if (!d) return null;
-    const base = (view === "overall" || view === "100x") ? effectiveStart : chartData[0]?.balance || d.balance;
+    
+    // Calculate PnL based on view context
+    let base;
+    if (view === 'overall' || view === '100x') {
+       base = effectiveStart;
+    } else {
+       // For monthly view, base is the balance of the FIRST data point (which is now the ghost entry)
+       base = chartData[0]?.balance || d.balance; 
+    }
+
     const pnl = d.balance - base;
     const pos = pnl >= 0;
     
@@ -343,6 +351,29 @@ export default function PortfolioTracker() {
             </span>
             <span style={{ fontSize: 11, color: "#555" }}>{stats.overallMulti.toFixed(2)}x</span>
           </div>
+          
+           {/* Month Stats (Only show if viewing a specific month) */}
+           {view !== "overall" && view !== "100x" && view !== "overlay" && (
+            <>
+              <div style={{ width: 1, height: 18, background: "#2a2a3a" }} />
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 11, color: "#444" }}>
+                  {MONTHS[parseInt(view)]}:
+                </span>
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: stats.monthPnl >= 0 ? "#4caf7c" : "#e05555",
+                    fontWeight: 600,
+                  }}
+                >
+                  {stats.monthPnl >= 0 ? "+" : ""}${fmt(stats.monthPnl)} (
+                  {stats.monthPnl >= 0 ? "+" : ""}
+                  {stats.monthPct.toFixed(2)}%)
+                </span>
+              </div>
+            </>
+          )}
         </div>
 
         {/* PROGRESS BAR */}
@@ -444,7 +475,6 @@ export default function PortfolioTracker() {
                 />
                 <YAxis
                   orientation="left"
-                  // CONDITIONAL DOMAIN: If '100x' view, lock to 0-79000
                   domain={view === '100x' ? [0, 79000] : ["auto", "auto"]}
                   tickFormatter={(v) => `$${v >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toLocaleString()}`}
                   tick={{ fill: "#888", fontSize: 11 }}
@@ -455,7 +485,6 @@ export default function PortfolioTracker() {
                 <Tooltip content={<CustomTooltip />} cursor={{ stroke: "#2a2a3a", strokeWidth: 1 }} />
                 
                 {view === 'overlay' ? (
-                  // RENDER MULTIPLE LINES FOR OVERLAY
                   MONTHS.map((m, i) => (
                      monthsWithData.has(i) && (
                       <Line
@@ -471,7 +500,6 @@ export default function PortfolioTracker() {
                      )
                   ))
                 ) : (
-                  // RENDER SINGLE AREA FOR NORMAL VIEWS
                   <Area
                     type="monotone"
                     dataKey="balance"
@@ -547,5 +575,3 @@ export default function PortfolioTracker() {
     </div>
   );
 }
-
-
