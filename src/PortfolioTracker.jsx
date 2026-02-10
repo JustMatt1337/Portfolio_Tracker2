@@ -285,7 +285,7 @@ export default function PortfolioTracker() {
 
   return (
     <div style={{ background: "#0e0e14", minHeight: "100vh", padding: "28px 16px 24px", fontFamily: "'Segoe UI',sans-serif", color: "#ccc" }}>
-      <div style={{ maxWidth: 980, margin: "0 auto" }}>
+      <div style={{ maxWidth: 1280, margin: "0 auto" }}>
         
         {/* HEADER */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
@@ -504,4 +504,5 @@ export default function PortfolioTracker() {
     </div>
   );
 }
+
 
