@@ -9,6 +9,7 @@ import {
   Tooltip,
   ResponsiveContainer,
   Legend,
+  ReferenceLine,
 } from "recharts";
 
 const MONTHS = [
@@ -49,7 +50,7 @@ const fmt = (n) =>
   });
 
 const formatDatePretty = (dateStr) => {
-  if (!dateStr || dateStr.includes("Start")) return dateStr;
+  if (!dateStr || dateStr.includes("Start") || dateStr === "0") return dateStr;
   const d = new Date(dateStr);
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 };
@@ -168,6 +169,8 @@ export default function PortfolioTracker() {
   const [privacyMode, setPrivacyMode] = useState(false);
   const [hiddenMonths, setHiddenMonths] = useState(new Set());
   const [highlightedMonth, setHighlightedMonth] = useState(null);
+  // metric: 'value' | 'profit' | 'percent'
+  const [metric, setMetric] = useState("value");
 
   const fetchData = async () => {
     setLoading(true);
@@ -260,70 +263,165 @@ export default function PortfolioTracker() {
   const chartData = useMemo(() => {
     if (!sortedEntries.length) return [];
 
+    // --- OVERLAY MODE ---
     if (view === "overlay") {
       const dayMap = new Map();
+
+      // 1. Calculate Baselines (Start of month = End of prev month)
+      const monthBaselines = {};
+      MONTHS.forEach((_, mIdx) => {
+        // Find last entry of previous month
+        const prevMonthEntries = sortedEntries.filter((e) => {
+          const d = new Date(e.date + "T00:00:00");
+          return d.getMonth() === mIdx - 1;
+        });
+
+        if (prevMonthEntries.length > 0) {
+          monthBaselines[mIdx] =
+            prevMonthEntries[prevMonthEntries.length - 1].balance;
+        } else {
+          // Fallback for very first month data point
+          const thisMonthEntries = sortedEntries.filter(
+            (e) => new Date(e.date + "T00:00:00").getMonth() === mIdx
+          );
+          if (thisMonthEntries.length > 0) {
+            monthBaselines[mIdx] = thisMonthEntries[0].balance;
+          }
+        }
+      });
+
+      // 2. Initialize Day 0 for all active months with baseline
+      const day0 = { label: "0" };
+      monthsWithData.forEach((mIdx) => {
+        const monthName = MONTHS[mIdx];
+        const base = monthBaselines[mIdx];
+        if (base !== undefined) {
+          if (metric === "value") day0[monthName] = base;
+          if (metric === "profit") day0[monthName] = 0;
+          if (metric === "percent") day0[monthName] = 0;
+        }
+      });
+      dayMap.set("0", day0);
+
+      // 3. Process actual entries
       sortedEntries.forEach((e) => {
         const dObj = new Date(e.date + "T00:00:00");
         const dayKey = String(dObj.getDate()).padStart(2, "0");
-        const monthName = MONTHS[dObj.getMonth()];
+        const mIdx = dObj.getMonth();
+        const monthName = MONTHS[mIdx];
+        const base = monthBaselines[mIdx];
+
+        if (base === undefined) return;
 
         if (!dayMap.has(dayKey)) {
           dayMap.set(dayKey, { label: dayKey });
         }
-        dayMap.get(dayKey)[monthName] = e.balance;
+
+        const entry = dayMap.get(dayKey);
+        let val = e.balance;
+
+        if (metric === "profit") val = e.balance - base;
+        if (metric === "percent") val = ((e.balance - base) / base) * 100;
+
+        entry[monthName] = val;
       });
-      return Array.from(dayMap.values()).sort((a, b) =>
-        a.label.localeCompare(b.label)
+
+      return Array.from(dayMap.values()).sort(
+        (a, b) => parseInt(a.label) - parseInt(b.label)
       );
     }
 
+    // --- OVERALL / 100x / SINGLE MONTH ---
+    let dataToProcess = [];
+    let baseline = effectiveStart;
+
     if (view === "overall" || view === "100x") {
-      return sortedEntries.map((e) => ({
-        label: formatDatePretty(e.date),
+      dataToProcess = sortedEntries;
+      baseline = effectiveStart;
+    } else {
+      // Single Month
+      const mi = parseInt(view);
+      dataToProcess = sortedEntries.filter(
+        (e) => new Date(e.date + "T00:00:00").getMonth() === mi
+      );
+
+      if (dataToProcess.length) {
+        const firstEntryIdx = sortedEntries.indexOf(dataToProcess[0]);
+        const prevEntry =
+          firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
+        baseline = prevEntry ? prevEntry.balance : dataToProcess[0].balance;
+      }
+    }
+
+    if (!dataToProcess.length) return [];
+
+    // Map entries based on view and metric
+    const mapped = dataToProcess.map((e) => {
+      let val = e.balance;
+      const target = effectiveStart * 100;
+
+      if (view === "100x" && metric === "percent") {
+        // Special case: 100x view percentage is based on Goal target
+        val = (e.balance / target) * 100;
+      } else if (metric === "profit") {
+        val = e.balance - baseline;
+      } else if (metric === "percent") {
+        val = ((e.balance - baseline) / baseline) * 100;
+      }
+
+      return {
+        label:
+          view === "overall" || view === "100x"
+            ? formatDatePretty(e.date)
+            : e.date.slice(8),
         date: e.date,
-        balance: e.balance,
-        profit:
-          effectiveStart > 0
-            ? ((e.balance - effectiveStart) / effectiveStart) * 100
-            : 0,
-        multiplier: effectiveStart > 0 ? e.balance / effectiveStart : 1,
-      }));
+        originalBalance: e.balance, // Keep for tooltips
+        value: val,
+        isBaseline: false,
+      };
+    });
+
+    // Prepend "Start" point logic
+    if (view !== "overall" && view !== "100x" && dataToProcess.length > 0) {
+      if (metric !== "value") {
+        // Profit/Percent mode
+
+        // FIX: Only prepend a "Start" point if the first data point is significantly different from 0.
+        // If the first point is effectively 0 (the start of the month/challenge),
+        // prepending another 0 point creates an ugly flat line.
+        if (Math.abs(mapped[0].value) > 0.0001) {
+          const firstDate = new Date(dataToProcess[0].date);
+          const prevDate = new Date(firstDate);
+          prevDate.setDate(prevDate.getDate() - 1);
+
+          mapped.unshift({
+            label: "Start",
+            date: prevDate.toISOString().split("T")[0],
+            originalBalance: baseline,
+            value: 0,
+            isBaseline: true,
+          });
+        }
+      } else {
+        // Value mode: prepend previous balance
+        const firstEntryIdx = sortedEntries.indexOf(dataToProcess[0]);
+        const prevEntry =
+          firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
+
+        if (prevEntry) {
+          mapped.unshift({
+            label: "Start",
+            date: prevEntry.date,
+            originalBalance: prevEntry.balance,
+            value: prevEntry.balance,
+            isBaseline: true,
+          });
+        }
+      }
     }
 
-    const mi = parseInt(view);
-    const me = sortedEntries.filter(
-      (e) => new Date(e.date + "T00:00:00").getMonth() === mi
-    );
-    if (!me.length) return [];
-
-    const firstEntryIdx = sortedEntries.indexOf(me[0]);
-    const prevEntry =
-      firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
-
-    const baseline = prevEntry ? prevEntry.balance : me[0].balance;
-
-    const data = me.map((e) => ({
-      label: e.date.slice(8),
-      date: e.date,
-      balance: e.balance,
-      profit: baseline > 0 ? ((e.balance - baseline) / baseline) * 100 : 0,
-      multiplier: baseline > 0 ? e.balance / baseline : 1,
-      isBaseline: false,
-    }));
-
-    if (prevEntry) {
-      data.unshift({
-        label: "Start",
-        date: prevEntry.date,
-        balance: prevEntry.balance,
-        profit: 0,
-        multiplier: 1,
-        isBaseline: true,
-      });
-    }
-
-    return data;
-  }, [sortedEntries, view, effectiveStart]);
+    return mapped;
+  }, [sortedEntries, view, effectiveStart, metric, monthsWithData]);
 
   const stats = useMemo(() => {
     const last = sortedEntries.length
@@ -396,11 +494,51 @@ export default function PortfolioTracker() {
     };
   }, [sortedEntries, effectiveStart, view]);
 
-  const lastProfit =
-    chartData.length && view !== "overlay"
-      ? chartData[chartData.length - 1].profit
-      : 0;
-  const areaColor = lastProfit >= 0 ? "#4caf7c" : "#e05555";
+  // --- BUTTON HOVER STATS (Pre-calculate for all months) ---
+  const allMonthFinals = useMemo(() => {
+    const stats = {};
+
+    // We only care about months that actually have data
+    monthsWithData.forEach((mIdx) => {
+      const mStr = MONTHS[mIdx];
+      const me = sortedEntries.filter(
+        (e) => new Date(e.date + "T00:00:00").getMonth() === mIdx
+      );
+      if (!me.length) return;
+
+      const lastEntry = me[me.length - 1];
+
+      // Calculate baseline for this month (same logic as before)
+      const prevMonthEntries = sortedEntries.filter(
+        (e) => new Date(e.date + "T00:00:00").getMonth() === mIdx - 1
+      );
+      let base = 0;
+      if (prevMonthEntries.length > 0) {
+        base = prevMonthEntries[prevMonthEntries.length - 1].balance;
+      } else {
+        base = me[0].balance;
+      }
+
+      stats[mStr] = {
+        value: lastEntry.balance,
+        profit: lastEntry.balance - base,
+        percent: base > 0 ? ((lastEntry.balance - base) / base) * 100 : 0,
+      };
+    });
+
+    return stats;
+  }, [sortedEntries, monthsWithData]);
+
+  // Determine line color based on logic
+  const isPositive =
+    chartData.length > 0 && chartData[chartData.length - 1].value >= 0;
+  // If in 'value' mode, we compare to first point, otherwise compare to 0
+  const isPositiveValue =
+    chartData.length > 0 &&
+    chartData[chartData.length - 1].value >=
+      (metric === "value" ? chartData[0].value : 0);
+
+  const areaColor = isPositiveValue ? "#4caf7c" : "#e05555";
 
   const copyStats = () => {
     const text = `🎯 100x Update\nCurrent: $${fmt(
@@ -443,7 +581,7 @@ export default function PortfolioTracker() {
               style={{
                 display: "flex",
                 alignItems: "center",
-                gap: 4,
+                gap: 6,
                 cursor: "pointer",
                 opacity: isHidden ? 0.3 : 1,
                 padding: "4px 8px",
@@ -461,7 +599,13 @@ export default function PortfolioTracker() {
                   border: isHighlighted ? "2px solid white" : "none",
                 }}
               />
-              <span style={{ color: isHighlighted ? "#fff" : "#888" }}>
+              <span
+                style={{
+                  color: isHighlighted ? "#fff" : "#888",
+                  fontWeight: isHighlighted ? 600 : 400,
+                  transition: "color 0.2s",
+                }}
+              >
                 {entry.value}
               </span>
             </div>
@@ -510,7 +654,9 @@ export default function PortfolioTracker() {
                   {p.name}:
                 </span>
                 <span style={{ color: "#e8e8e8", fontWeight: 600 }}>
-                  {privacyMode ? "$ ****" : `$${fmt(p.value)}`}
+                  {metric === "percent" && "+"}
+                  {fmt(p.value)}
+                  {metric === "percent" ? "%" : metric === "profit" ? "$" : ""}
                 </span>
               </div>
             ))}
@@ -542,27 +688,26 @@ export default function PortfolioTracker() {
               marginBottom: 5,
             }}
           >
-            Previous Month End
+            Starting Point
           </div>
           <div style={{ color: "#888", fontSize: 13 }}>
-            {privacyMode ? "$ ****" : `$${fmt(d.balance)}`}
-          </div>
-          <div style={{ color: "#555", fontSize: 10, marginTop: 4 }}>
-            (Baseline for this month)
+            {privacyMode ? "$ ****" : `$${fmt(d.originalBalance)}`}
           </div>
         </div>
       );
     }
 
-    let base;
-    if (view === "overall" || view === "100x") {
-      base = effectiveStart;
+    const is100xPercent = view === "100x" && metric === "percent";
+    let mainValueDisplay;
+    if (is100xPercent) {
+      mainValueDisplay = `${fmt(d.value)}% of Goal`;
+    } else if (metric === "percent") {
+      mainValueDisplay = `${d.value >= 0 ? "+" : ""}${fmt(d.value)}%`;
+    } else if (metric === "profit") {
+      mainValueDisplay = `${d.value >= 0 ? "+" : ""}$${fmt(d.value)}`;
     } else {
-      base = chartData[0]?.balance || d.balance;
+      mainValueDisplay = privacyMode ? "$ ****" : `$${fmt(d.value)}`;
     }
-
-    const pnl = d.balance - base;
-    const pos = pnl >= 0;
 
     return (
       <div
@@ -594,18 +739,38 @@ export default function PortfolioTracker() {
             marginBottom: 3,
           }}
         >
-          {privacyMode ? "$ ****" : `$${fmt(d.balance)}`}
+          {mainValueDisplay}
         </div>
-        <div style={{ color: pos ? "#4caf7c" : "#e05555", fontSize: 12 }}>
-          {pos ? "+" : ""}
-          {privacyMode ? "$ ****" : `$${fmt(pnl)}`} ({pos ? "+" : ""}
-          {d.profit.toFixed(2)}%)
-        </div>
-        <div style={{ color: "#555", fontSize: 11, marginTop: 2 }}>
-          {d.multiplier.toFixed(2)}x
-        </div>
+        {metric !== "value" && (
+          <div style={{ color: "#666", fontSize: 11 }}>
+            Bal: {privacyMode ? "****" : `$${fmt(d.originalBalance)}`}
+          </div>
+        )}
       </div>
     );
+  };
+
+  const getAxisTickFormatter = (val) => {
+    if (privacyMode && metric === "value") return "****";
+    if (metric === "percent") return `${val.toFixed(0)}%`;
+    if (metric === "profit") {
+      return (
+        (val >= 0 ? "+" : "") +
+        (Math.abs(val) >= 1000 ? (val / 1000).toFixed(1) + "k" : val)
+      );
+    }
+    // Value mode
+    return val >= 1000 ? (val / 1000).toFixed(1) + "K" : val.toLocaleString();
+  };
+
+  // Calculate domain for 100x view based on metric
+  const get100xDomain = () => {
+    if (view !== "100x") return ["auto", "auto"];
+    const target = effectiveStart * 100;
+    if (metric === "percent") return [0, 100];
+    if (metric === "profit") return [0, target - effectiveStart];
+    // value mode
+    return [0, Math.max(target, stats.currentBalance * 1.1)];
   };
 
   return (
@@ -633,6 +798,16 @@ export default function PortfolioTracker() {
         .animate-in {
           animation: fadeIn 0.6s ease-out forwards;
           opacity: 0; 
+        }
+        
+        /* LEGEND ANIMATION */
+        .legend-val {
+          animation: slideRight 0.2s ease-out forwards;
+          display: inline-block;
+        }
+        @keyframes slideRight {
+          from { opacity: 0; transform: translateX(-5px); }
+          to { opacity: 1; transform: translateX(0); }
         }
 
         /* Custom Scrollbar */
@@ -664,6 +839,17 @@ export default function PortfolioTracker() {
           -webkit-background-clip: text;
           -webkit-text-fill-color: transparent;
         }
+         .toggle-btn {
+             background: #1a1a24; border: 1px solid #2a2a3a; color: #666; padding: 5px 12px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.2s;
+        }
+        .toggle-btn.active {
+            background: #2a2a3a; color: #fff; border-color: #555;
+        }
+        .toggle-group {
+            display: flex; border-radius: 6px; overflow: hidden; border: 1px solid #2a2a3a;
+        }
+        .toggle-group .toggle-btn { border: none; border-right: 1px solid #2a2a3a; border-radius: 0; }
+        .toggle-group .toggle-btn:last-child { border-right: none; }
       `}</style>
       <div style={{ maxWidth: 1280, margin: "0 auto" }}>
         {/* HEADER */}
@@ -700,7 +886,29 @@ export default function PortfolioTracker() {
               )}
             </span>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+            {/* METRIC TOGGLE */}
+            <div className="toggle-group">
+              <button
+                className={`toggle-btn ${metric === "value" ? "active" : ""}`}
+                onClick={() => setMetric("value")}
+              >
+                Value $
+              </button>
+              <button
+                className={`toggle-btn ${metric === "profit" ? "active" : ""}`}
+                onClick={() => setMetric("profit")}
+              >
+                Profit $
+              </button>
+              <button
+                className={`toggle-btn ${metric === "percent" ? "active" : ""}`}
+                onClick={() => setMetric("percent")}
+              >
+                Growth %
+              </button>
+            </div>
+
             <button
               onClick={() => setPrivacyMode(!privacyMode)}
               style={{
@@ -726,7 +934,7 @@ export default function PortfolioTracker() {
                 cursor: "pointer",
               }}
             >
-              📋 Copy Stats
+              📋
             </button>
             <button
               onClick={fetchData}
@@ -757,7 +965,7 @@ export default function PortfolioTracker() {
                   }}
                 />
               ) : (
-                "↻ Refresh"
+                "↻"
               )}
             </button>
           </div>
@@ -997,10 +1205,17 @@ export default function PortfolioTracker() {
             {MONTHS.map((m, i) => {
               const has = monthsWithData.has(i),
                 active = view === String(i);
+
+              // New Hover Logic
+              const isHovered = highlightedMonth === m;
+              const stats = allMonthFinals[m];
+
               return (
                 <button
                   key={m}
                   onClick={() => has && setView(String(i))}
+                  onMouseEnter={() => setHighlightedMonth(m)}
+                  onMouseLeave={() => setHighlightedMonth(null)}
                   style={{
                     background: active ? "#ccc2" : has ? "#1a1a24" : "#141418",
                     border: `1px solid ${
@@ -1015,6 +1230,9 @@ export default function PortfolioTracker() {
                     opacity: has ? 1 : 0.4,
                     position: "relative",
                     whiteSpace: "nowrap",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
                   }}
                 >
                   {m}
@@ -1030,6 +1248,28 @@ export default function PortfolioTracker() {
                         background: "#4caf7c",
                       }}
                     />
+                  )}
+
+                  {/* The Super Slick Hover Effect */}
+                  {has && isHovered && stats && (
+                    <span
+                      className="legend-val"
+                      style={{
+                        color: stats.profit >= 0 ? "#4caf7c" : "#e05555",
+                        fontWeight: 600,
+                        fontSize: 11,
+                      }}
+                    >
+                      {privacyMode
+                        ? "****"
+                        : metric === "percent"
+                        ? `${stats.profit >= 0 ? "+" : ""}${fmt(
+                            stats.percent
+                          )}%`
+                        : metric === "profit"
+                        ? `${stats.profit >= 0 ? "+" : ""}$${fmt(stats.profit)}`
+                        : `$${fmt(stats.value)}`}
+                    </span>
                   )}
                 </button>
               );
@@ -1121,26 +1361,8 @@ export default function PortfolioTracker() {
                 />
                 <YAxis
                   orientation="left"
-                  domain={
-                    view === "100x"
-                      ? [
-                          0,
-                          Math.max(
-                            effectiveStart * 100,
-                            stats.currentBalance * 1.1
-                          ),
-                        ]
-                      : ["auto", "auto"]
-                  }
-                  tickFormatter={(v) =>
-                    privacyMode
-                      ? "****"
-                      : `$${
-                          v >= 1000
-                            ? (v / 1000).toFixed(1) + "K"
-                            : v.toLocaleString()
-                        }`
-                  }
+                  domain={get100xDomain()}
+                  tickFormatter={getAxisTickFormatter}
                   tick={{ fill: "#888", fontSize: 11 }}
                   axisLine={{ stroke: "#2a2a3a" }}
                   tickLine={false}
@@ -1150,6 +1372,10 @@ export default function PortfolioTracker() {
                   content={<CustomTooltip />}
                   cursor={{ stroke: "#2a2a3a", strokeWidth: 1 }}
                 />
+
+                {metric !== "value" && view !== "100x" && (
+                  <ReferenceLine y={0} stroke="#444" strokeDasharray="3 3" />
+                )}
 
                 {view === "overlay" ? (
                   <>
@@ -1174,7 +1400,7 @@ export default function PortfolioTracker() {
                           strokeOpacity={opacity}
                           dot={{ r: 3, opacity }}
                           activeDot={{ r: 5 }}
-                          connectNulls
+                          connectNulls={true}
                         />
                       );
                     })}
@@ -1183,7 +1409,7 @@ export default function PortfolioTracker() {
                 ) : (
                   <Area
                     type="monotone"
-                    dataKey="balance"
+                    dataKey="value"
                     stroke={areaColor}
                     strokeWidth={3}
                     style={{ filter: `drop-shadow(0 0 6px ${areaColor})` }}
