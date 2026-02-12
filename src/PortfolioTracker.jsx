@@ -850,6 +850,9 @@ export default function PortfolioTracker() {
         }
         .toggle-group .toggle-btn { border: none; border-right: 1px solid #2a2a3a; border-radius: 0; }
         .toggle-group .toggle-btn:last-child { border-right: none; }
+        body { 
+            margin: 0;
+        }
       `}</style>
       <div style={{ maxWidth: 1280, margin: "0 auto" }}>
         {/* HEADER */}
@@ -1562,3 +1565,4 @@ export default function PortfolioTracker() {
 }
 
 //mott
+
