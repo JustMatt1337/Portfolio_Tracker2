@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   ComposedChart,
   Line,
@@ -128,21 +128,69 @@ function parseCSV(text) {
   return entries;
 }
 
+function parseBenchmarkCSV(text) {
+  const lines = text
+    .trim()
+    .split("\n")
+    .filter((l) => l.trim().length > 0);
+
+  if (lines.length < 2) return [];
+
+  return lines
+    .slice(1)
+    .map((line) => {
+      const [dateStr, open, high, low, close] = line.split(",");
+      const closeVal = parseFloat(close);
+      if (!dateStr || isNaN(closeVal)) return null;
+      return { date: dateStr.trim(), close: closeVal };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function loadBenchmarkSeries(symbol) {
+  const res = await fetch(
+    `https://stooq.com/q/d/l/?s=${symbol}.us&i=d&t=${Date.now()}`
+  );
+  if (!res.ok) throw new Error("Failed benchmark fetch");
+  const text = await res.text();
+  return parseBenchmarkCSV(text);
+}
+
+async function loadBenchmarkSeriesWithFallback(symbol, fallbackPath) {
+  try {
+    const liveData = await loadBenchmarkSeries(symbol);
+    if (liveData.length) return liveData;
+  } catch {
+    // Fallback below
+  }
+
+  const res = await fetch(fallbackPath);
+  if (!res.ok) return [];
+  const text = await res.text();
+  return parseBenchmarkCSV(text);
+}
+
 // --- ANIMATED NUMBER COMPONENT ---
-const AnimatedNumber = ({ value }) => {
-  const [displayValue, setDisplayValue] = useState(0);
+const AnimatedNumber = ({ value, duration = 1200 }) => {
+  const [displayValue, setDisplayValue] = useState(value);
+  const prevValueRef = useRef(value);
 
   useEffect(() => {
-    let start = 0;
+    let animationFrame;
+    let start = prevValueRef.current;
     const end = value;
-    if (start === end) return;
-
-    if (Math.abs(end - start) < 10) {
-      setDisplayValue(end);
+    if (start === end) {
+      prevValueRef.current = value;
       return;
     }
 
-    const duration = 1200;
+    if (Math.abs(end - start) < 10) {
+      setDisplayValue(end);
+      prevValueRef.current = value;
+      return;
+    }
+
     const startTime = performance.now();
 
     const animate = (currentTime) => {
@@ -154,12 +202,17 @@ const AnimatedNumber = ({ value }) => {
       setDisplayValue(current);
 
       if (progress < 1) {
-        requestAnimationFrame(animate);
+        animationFrame = requestAnimationFrame(animate);
       }
     };
 
-    requestAnimationFrame(animate);
-  }, [value]);
+    animationFrame = requestAnimationFrame(animate);
+
+    prevValueRef.current = value;
+    return () => {
+      if (animationFrame) cancelAnimationFrame(animationFrame);
+    };
+  }, [value, duration]);
 
   return fmt(displayValue);
 };
@@ -177,6 +230,10 @@ export default function PortfolioTracker() {
 
   // NEW: State for tooltip to ensure it renders reliably
   const [hoveredMonthStats, setHoveredMonthStats] = useState(null);
+  const [scrubbedPoint, setScrubbedPoint] = useState(null);
+  const [showSp500, setShowSp500] = useState(false);
+  const [showNasdaq, setShowNasdaq] = useState(false);
+  const [benchmarks, setBenchmarks] = useState({ sp500: [], nasdaq: [] });
 
   const fetchData = async () => {
     setLoading(true);
@@ -187,6 +244,22 @@ export default function PortfolioTracker() {
 
   useEffect(() => {
     fetchData();
+  }, []);
+
+  useEffect(() => {
+    const fetchBenchmarks = async () => {
+      try {
+        const [sp500, nasdaq] = await Promise.all([
+          loadBenchmarkSeriesWithFallback("spy", "/benchmark_sp500.csv"),
+          loadBenchmarkSeriesWithFallback("qqq", "/benchmark_nasdaq.csv"),
+        ]);
+        setBenchmarks({ sp500, nasdaq });
+      } catch {
+        setBenchmarks({ sp500: [], nasdaq: [] });
+      }
+    };
+
+    fetchBenchmarks();
   }, []);
 
   const sortedEntries = useMemo(
@@ -417,6 +490,89 @@ export default function PortfolioTracker() {
     return mapped;
   }, [sortedEntries, view, effectiveStart, metric, monthsWithData]);
 
+  const viewBaseline = useMemo(() => {
+    if (view === "overall" || view === "100x") return effectiveStart;
+    if (view === "overlay") return effectiveStart;
+
+    const mi = parseInt(view);
+    const monthEntries = sortedEntries.filter(
+      (e) => new Date(e.date + "T00:00:00").getMonth() === mi
+    );
+    if (!monthEntries.length) return effectiveStart;
+
+    const firstEntryIdx = sortedEntries.indexOf(monthEntries[0]);
+    const prevEntry = firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
+    return prevEntry ? prevEntry.balance : monthEntries[0].balance;
+  }, [view, sortedEntries, effectiveStart]);
+
+  const chartDataWithBenchmarks = useMemo(() => {
+    if (
+      !chartData.length ||
+      view === "overlay" ||
+      (!showSp500 && !showNasdaq)
+    )
+      return chartData;
+
+    const getCloseOnOrBefore = (series, targetDate) => {
+      let lo = 0;
+      let hi = series.length - 1;
+      let best = null;
+
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const curr = series[mid];
+        if (curr.date <= targetDate) {
+          best = curr;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return best?.close ?? null;
+    };
+
+    const anchorDate = chartData[0]?.date;
+    if (!anchorDate) return chartData;
+
+    const spBaseClose = getCloseOnOrBefore(benchmarks.sp500, anchorDate);
+    const nqBaseClose = getCloseOnOrBefore(benchmarks.nasdaq, anchorDate);
+    const target100x = effectiveStart * 100;
+
+    const mapBenchmark = (pointDate, baseClose, series) => {
+      if (!baseClose) return null;
+      const pointClose = getCloseOnOrBefore(series, pointDate);
+      if (!pointClose) return null;
+
+      const benchmarkValue = viewBaseline * (pointClose / baseClose);
+
+      if (view === "100x" && metric === "percent") {
+        return (benchmarkValue / target100x) * 100;
+      }
+      if (metric === "profit") return benchmarkValue - viewBaseline;
+      if (metric === "percent") {
+        return viewBaseline > 0
+          ? ((benchmarkValue - viewBaseline) / viewBaseline) * 100
+          : 0;
+      }
+      return benchmarkValue;
+    };
+
+    return chartData.map((point) => ({
+      ...point,
+      sp500Compare: mapBenchmark(point.date, spBaseClose, benchmarks.sp500),
+      nasdaqCompare: mapBenchmark(point.date, nqBaseClose, benchmarks.nasdaq),
+    }));
+  }, [
+    chartData,
+    view,
+    showSp500,
+    showNasdaq,
+    benchmarks,
+    metric,
+    viewBaseline,
+    effectiveStart,
+  ]);
+
   const stats = useMemo(() => {
     const last = sortedEntries.length
       ? sortedEntries[sortedEntries.length - 1]
@@ -488,6 +644,34 @@ export default function PortfolioTracker() {
     };
   }, [sortedEntries, effectiveStart, view]);
 
+  const scrubbedHeaderStats = useMemo(() => {
+    if (!scrubbedPoint?.originalBalance) return null;
+
+    const scrubbedBalance = scrubbedPoint.originalBalance;
+    const scrubbedPnl = scrubbedBalance - effectiveStart;
+    const scrubbedPct =
+      effectiveStart > 0 ? (scrubbedPnl / effectiveStart) * 100 : 0;
+
+    return {
+      balance: scrubbedBalance,
+      pnl: scrubbedPnl,
+      pct: scrubbedPct,
+      date: scrubbedPoint.date,
+    };
+  }, [scrubbedPoint, effectiveStart]);
+
+  const activeHeaderBalance = scrubbedHeaderStats
+    ? scrubbedHeaderStats.balance
+    : stats.currentBalance;
+  const activeHeaderPnl = scrubbedHeaderStats
+    ? scrubbedHeaderStats.pnl
+    : stats.overallPnl;
+  const activeHeaderPct = scrubbedHeaderStats
+    ? scrubbedHeaderStats.pct
+    : stats.overallPct;
+  const activeHeaderMulti =
+    effectiveStart > 0 ? activeHeaderBalance / effectiveStart : 0;
+
   // --- BUTTON HOVER STATS ---
   const allMonthFinals = useMemo(() => {
     const stats = {};
@@ -519,7 +703,7 @@ export default function PortfolioTracker() {
   }, [sortedEntries, monthsWithData]);
 
   // Theme Logic
-  const isWinning = stats.overallPnl >= 0;
+  const isWinning = activeHeaderPnl >= 0;
 
   const themeColors = isWinning
     ? {
@@ -988,7 +1172,10 @@ export default function PortfolioTracker() {
                   >
                     $
                   </span>
-                  <AnimatedNumber value={stats.currentBalance} />
+                  <AnimatedNumber
+                    value={activeHeaderBalance}
+                    duration={scrubbedHeaderStats ? 180 : 1200}
+                  />
                 </>
               )}
             </h1>
@@ -1065,10 +1252,22 @@ export default function PortfolioTracker() {
                       : semanticColors.negative,
                   }}
                 >
-                  {stats.overallPnl >= 0 ? "+" : ""}
-                  {privacyMode ? "****" : fmt(stats.overallPnl)}
+                  {activeHeaderPnl >= 0 ? "+" : ""}
+                  {privacyMode ? (
+                    "****"
+                  ) : (
+                    <AnimatedNumber
+                      value={Math.abs(activeHeaderPnl)}
+                      duration={scrubbedHeaderStats ? 180 : 1200}
+                    />
+                  )}
                   <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 6 }}>
-                    ({stats.overallPct.toFixed(2)}%)
+                    ({activeHeaderPct >= 0 ? "+" : ""}
+                    <AnimatedNumber
+                      value={Math.abs(activeHeaderPct)}
+                      duration={scrubbedHeaderStats ? 180 : 1200}
+                    />
+                    %)
                   </span>
                 </div>
               </div>
@@ -1089,7 +1288,11 @@ export default function PortfolioTracker() {
                   className="mono-num"
                   style={{ fontSize: 16, fontWeight: 600, color: "#e2e8f0" }}
                 >
-                  {stats.overallMulti.toFixed(2)}x
+                  <AnimatedNumber
+                    value={activeHeaderMulti}
+                    duration={scrubbedHeaderStats ? 180 : 1200}
+                  />
+                  x
                 </div>
               </div>
             </div>
@@ -1284,6 +1487,56 @@ export default function PortfolioTracker() {
               Month Overlay
             </button>
 
+            <button
+              onClick={() => view !== "overlay" && setShowSp500((prev) => !prev)}
+              className={`nav-btn ${showSp500 ? "active" : ""}`}
+              style={{
+                opacity: view === "overlay" ? 0.3 : 1,
+                cursor: view === "overlay" ? "default" : "pointer",
+                borderColor: showSp500 ? "#f59e0b" : undefined,
+              }}
+            >
+              S&P
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: -4,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  width: 4,
+                  height: 4,
+                  borderRadius: "50%",
+                  background: "#f59e0b",
+                  opacity: 0.85,
+                }}
+              />
+            </button>
+
+            <button
+              onClick={() => view !== "overlay" && setShowNasdaq((prev) => !prev)}
+              className={`nav-btn ${showNasdaq ? "active" : ""}`}
+              style={{
+                opacity: view === "overlay" ? 0.3 : 1,
+                cursor: view === "overlay" ? "default" : "pointer",
+                borderColor: showNasdaq ? "#22d3ee" : undefined,
+              }}
+            >
+              Nasdaq
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: -4,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  width: 4,
+                  height: 4,
+                  borderRadius: "50%",
+                  background: "#22d3ee",
+                  opacity: 0.85,
+                }}
+              />
+            </button>
+
             <div
               style={{
                 width: 1,
@@ -1436,8 +1689,25 @@ export default function PortfolioTracker() {
           ) : (
             <ResponsiveContainer width="100%" height={380}>
               <ComposedChart
-                data={chartData}
+                data={chartDataWithBenchmarks}
                 margin={{ top: 10, right: 20, left: 10, bottom: 0 }}
+                onMouseMove={(state) => {
+                  if (view === "overlay") return;
+                  const activeIndex = state?.activeTooltipIndex;
+                  if (activeIndex == null) {
+                    setScrubbedPoint(null);
+                    return;
+                  }
+
+                  const point = chartData[activeIndex];
+                  if (!point || point.isBaseline) {
+                    setScrubbedPoint(null);
+                    return;
+                  }
+
+                  setScrubbedPoint(point);
+                }}
+                onMouseLeave={() => setScrubbedPoint(null)}
               >
                 <defs>
                   <linearGradient id="gArea" x1="0" y1="0" x2="0" y2="1">
@@ -1545,38 +1815,68 @@ export default function PortfolioTracker() {
                     <Legend content={<CustomLegend />} />
                   </>
                 ) : (
-                  <Area
-                    type="monotone"
-                    dataKey="value"
-                    stroke={areaColor}
-                    strokeWidth={3}
-                    fill="url(#gArea)"
-                    animationDuration={1500}
-                    filter="url(#glow)"
-                    dot={(props) => {
-                      const isLast = props.index === chartData.length - 1;
-                      if (!isLast)
-                        return <circle cx={props.cx} cy={props.cy} r={0} />;
-                      return (
-                        <g>
-                          <circle
-                            cx={props.cx}
-                            cy={props.cy}
-                            r={10}
-                            fill={areaColor}
-                            opacity={0.2}
-                            style={{ animation: "pulse-soft 2s infinite" }}
+                  <>
+                    <Area
+                      type="monotone"
+                      dataKey="value"
+                      stroke={areaColor}
+                      strokeWidth={3}
+                      fill="url(#gArea)"
+                      animationDuration={1500}
+                      filter="url(#glow)"
+                      dot={(props) => {
+                        const isLast = props.index === chartDataWithBenchmarks.length - 1;
+                        if (!isLast)
+                          return <circle cx={props.cx} cy={props.cy} r={0} />;
+                        return (
+                          <g>
+                            <circle
+                              cx={props.cx}
+                              cy={props.cy}
+                              r={10}
+                              fill={areaColor}
+                              opacity={0.2}
+                              style={{ animation: "pulse-soft 2s infinite" }}
+                            />
+                            <circle
+                              cx={props.cx}
+                              cy={props.cy}
+                              r={4}
+                              fill="#fff"
+                            />
+                          </g>
+                        );
+                      }}
+                    />
+                    {(showSp500 || showNasdaq) && (
+                      <>
+                        {showSp500 && (
+                          <Line
+                            type="monotone"
+                            dataKey="sp500Compare"
+                            stroke="#f59e0b"
+                            strokeWidth={2}
+                            strokeDasharray="5 4"
+                            dot={false}
+                            connectNulls
+                            animationDuration={1200}
                           />
-                          <circle
-                            cx={props.cx}
-                            cy={props.cy}
-                            r={4}
-                            fill="#fff"
+                        )}
+                        {showNasdaq && (
+                          <Line
+                            type="monotone"
+                            dataKey="nasdaqCompare"
+                            stroke="#22d3ee"
+                            strokeWidth={2}
+                            strokeDasharray="2 4"
+                            dot={false}
+                            connectNulls
+                            animationDuration={1200}
                           />
-                        </g>
-                      );
-                    }}
-                  />
+                        )}
+                      </>
+                    )}
+                  </>
                 )}
               </ComposedChart>
             </ResponsiveContainer>
