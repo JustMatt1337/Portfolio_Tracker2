@@ -524,6 +524,8 @@ export default function PortfolioTracker() {
   const activeHeaderPct = scrubbedHeaderStats
     ? scrubbedHeaderStats.pct
     : stats.overallPct;
+  const activeHeaderMulti =
+    effectiveStart > 0 ? activeHeaderBalance / effectiveStart : 0;
 
   // --- BUTTON HOVER STATS ---
   const allMonthFinals = useMemo(() => {
@@ -1032,14 +1034,6 @@ export default function PortfolioTracker() {
                 </>
               )}
             </h1>
-            {scrubbedHeaderStats && (
-              <div
-                className="mono-num"
-                style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}
-              >
-                Scrubbing {formatDatePretty(scrubbedHeaderStats.date)}
-              </div>
-            )}
           </div>
 
           <div
@@ -1123,7 +1117,12 @@ export default function PortfolioTracker() {
                     />
                   )}
                   <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 6 }}>
-                    ({activeHeaderPct.toFixed(2)}%)
+                    ({activeHeaderPct >= 0 ? "+" : ""}
+                    <AnimatedNumber
+                      value={Math.abs(activeHeaderPct)}
+                      duration={scrubbedHeaderStats ? 180 : 1200}
+                    />
+                    %)
                   </span>
                 </div>
               </div>
@@ -1144,7 +1143,11 @@ export default function PortfolioTracker() {
                   className="mono-num"
                   style={{ fontSize: 16, fontWeight: 600, color: "#e2e8f0" }}
                 >
-                  {stats.overallMulti.toFixed(2)}x
+                  <AnimatedNumber
+                    value={activeHeaderMulti}
+                    duration={scrubbedHeaderStats ? 180 : 1200}
+                  />
+                  x
                 </div>
               </div>
             </div>
