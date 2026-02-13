@@ -1695,6 +1695,7 @@ export default function PortfolioTracker() {
             <ResponsiveContainer width="100%" height={380}>
               <ComposedChart
                 data={chartDataWithBenchmarks}
+                data={chartData}
                 margin={{ top: 10, right: 20, left: 10, bottom: 0 }}
                 onMouseMove={(state) => {
                   if (view === "overlay") return;
@@ -1882,6 +1883,38 @@ export default function PortfolioTracker() {
                       </>
                     )}
                   </>
+                  <Area
+                    type="monotone"
+                    dataKey="value"
+                    stroke={areaColor}
+                    strokeWidth={3}
+                    fill="url(#gArea)"
+                    animationDuration={1500}
+                    filter="url(#glow)"
+                    dot={(props) => {
+                      const isLast = props.index === chartData.length - 1;
+                      if (!isLast)
+                        return <circle cx={props.cx} cy={props.cy} r={0} />;
+                      return (
+                        <g>
+                          <circle
+                            cx={props.cx}
+                            cy={props.cy}
+                            r={10}
+                            fill={areaColor}
+                            opacity={0.2}
+                            style={{ animation: "pulse-soft 2s infinite" }}
+                          />
+                          <circle
+                            cx={props.cx}
+                            cy={props.cy}
+                            r={4}
+                            fill="#fff"
+                          />
+                        </g>
+                      );
+                    }}
+                  />
                 )}
               </ComposedChart>
             </ResponsiveContainer>
