@@ -128,6 +128,37 @@ function parseCSV(text) {
   return entries;
 }
 
+async function loadBenchmarkSeries(symbol) {
+  try {
+    const ticker = symbol.toUpperCase() === "SPY" ? "SPY" : "QQQ";
+    const accessKey = "046605c85cf4732b26bff18118d43f27";
+
+    // Pull a long enough history window for chart comparisons
+    const res = await fetch(
+      `https://api.marketstack.com/v1/eod?access_key=${accessKey}&symbols=${ticker}&limit=1000&sort=ASC&date_from=2018-01-01`
+    );
+
+    if (!res.ok) throw new Error("Failed benchmark fetch");
+    const data = await res.json();
+    const rows = Array.isArray(data?.data) ? data.data : [];
+
+    const parsed = rows
+      .map((r) => {
+        const rawDate = String(r?.date || "").slice(0, 10);
+        const close = Number(r?.close);
+        if (!rawDate || !Number.isFinite(close) || close <= 0) return null;
+        return { date: rawDate, close };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    return parsed;
+  } catch (err) {
+    console.error(`Failed to fetch ${symbol}:`, err);
+    return [];
+  }
+}
+
 // --- ANIMATED NUMBER COMPONENT ---
 const AnimatedNumber = ({ value, duration = 1200 }) => {
   const [displayValue, setDisplayValue] = useState(value);
@@ -188,6 +219,9 @@ export default function PortfolioTracker() {
   // NEW: State for tooltip to ensure it renders reliably
   const [hoveredMonthStats, setHoveredMonthStats] = useState(null);
   const [scrubbedPoint, setScrubbedPoint] = useState(null);
+  const [showSp500, setShowSp500] = useState(false);
+  const [showNasdaq, setShowNasdaq] = useState(false);
+  const [benchmarks, setBenchmarks] = useState({ sp500: [], nasdaq: [] });
 
   const fetchData = async () => {
     setLoading(true);
@@ -198,6 +232,22 @@ export default function PortfolioTracker() {
 
   useEffect(() => {
     fetchData();
+  }, []);
+
+  useEffect(() => {
+    const fetchBenchmarks = async () => {
+      const [sp500Res, nasdaqRes] = await Promise.allSettled([
+        loadBenchmarkSeries("spy"),
+        loadBenchmarkSeries("qqq"),
+      ]);
+
+      setBenchmarks({
+        sp500: sp500Res.status === "fulfilled" ? sp500Res.value : [],
+        nasdaq: nasdaqRes.status === "fulfilled" ? nasdaqRes.value : [],
+      });
+    };
+
+    fetchBenchmarks();
   }, []);
 
   const sortedEntries = useMemo(
@@ -427,6 +477,89 @@ export default function PortfolioTracker() {
 
     return mapped;
   }, [sortedEntries, view, effectiveStart, metric, monthsWithData]);
+
+  const viewBaseline = useMemo(() => {
+    if (view === "overall" || view === "100x") return effectiveStart;
+    if (view === "overlay") return effectiveStart;
+
+    const mi = parseInt(view);
+    const monthEntries = sortedEntries.filter(
+      (e) => new Date(e.date + "T00:00:00").getMonth() === mi
+    );
+    if (!monthEntries.length) return effectiveStart;
+
+    const firstEntryIdx = sortedEntries.indexOf(monthEntries[0]);
+    const prevEntry = firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
+    return prevEntry ? prevEntry.balance : monthEntries[0].balance;
+  }, [view, sortedEntries, effectiveStart]);
+
+  const chartDataWithBenchmarks = useMemo(() => {
+    if (
+      !chartData.length ||
+      view === "overlay" ||
+      (!showSp500 && !showNasdaq)
+    )
+      return chartData;
+
+    const getCloseOnOrBefore = (series, targetDate) => {
+      let lo = 0;
+      let hi = series.length - 1;
+      let best = null;
+
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const curr = series[mid];
+        if (curr.date <= targetDate) {
+          best = curr;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return best?.close ?? null;
+    };
+
+    const anchorDate = chartData[0]?.date;
+    if (!anchorDate) return chartData;
+
+    const spBaseClose = getCloseOnOrBefore(benchmarks.sp500, anchorDate);
+    const nqBaseClose = getCloseOnOrBefore(benchmarks.nasdaq, anchorDate);
+    const target100x = effectiveStart * 100;
+
+    const mapBenchmark = (pointDate, baseClose, series) => {
+      if (!baseClose) return null;
+      const pointClose = getCloseOnOrBefore(series, pointDate);
+      if (!pointClose) return null;
+
+      const benchmarkValue = viewBaseline * (pointClose / baseClose);
+
+      if (view === "100x" && metric === "percent") {
+        return (benchmarkValue / target100x) * 100;
+      }
+      if (metric === "profit") return benchmarkValue - viewBaseline;
+      if (metric === "percent") {
+        return viewBaseline > 0
+          ? ((benchmarkValue - viewBaseline) / viewBaseline) * 100
+          : 0;
+      }
+      return benchmarkValue;
+    };
+
+    return chartData.map((point) => ({
+      ...point,
+      sp500Compare: mapBenchmark(point.date, spBaseClose, benchmarks.sp500),
+      nasdaqCompare: mapBenchmark(point.date, nqBaseClose, benchmarks.nasdaq),
+    }));
+  }, [
+    chartData,
+    view,
+    showSp500,
+    showNasdaq,
+    benchmarks,
+    metric,
+    viewBaseline,
+    effectiveStart,
+  ]);
 
   const stats = useMemo(() => {
     const last = sortedEntries.length
@@ -1459,6 +1592,73 @@ export default function PortfolioTracker() {
           </div>
         </div>
 
+        {view !== "overlay" && (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              justifyContent: "center",
+              marginBottom: 12,
+              fontSize: 11,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
+            {[
+              { key: "sp500", label: "S&P", color: "#f59e0b", enabled: showSp500 },
+              {
+                key: "nasdaq",
+                label: "Nasdaq",
+                color: "#22d3ee",
+                enabled: showNasdaq,
+              },
+            ].map((benchmark) => (
+              <div
+                key={benchmark.key}
+                onClick={() =>
+                  benchmark.key === "sp500"
+                    ? setShowSp500((prev) => !prev)
+                    : setShowNasdaq((prev) => !prev)
+                }
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  cursor: "pointer",
+                  opacity: benchmark.enabled ? 1 : 0.3,
+                  padding: "4px 8px",
+                  borderRadius: 4,
+                  transition: "all 0.2s",
+                  border: benchmark.enabled
+                    ? `1px solid ${benchmark.color}`
+                    : "1px solid transparent",
+                }}
+              >
+                <div
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: benchmark.color,
+                    boxShadow: benchmark.enabled
+                      ? `0 0 8px ${benchmark.color}`
+                      : "none",
+                  }}
+                />
+                <span
+                  style={{
+                    color: benchmark.enabled ? "#fff" : "#888",
+                    fontWeight: benchmark.enabled ? 600 : 400,
+                    transition: "color 0.2s",
+                  }}
+                >
+                  {benchmark.label}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* CHART CONTAINER */}
         <div
           className="glass-panel animate-in"
@@ -1494,6 +1694,7 @@ export default function PortfolioTracker() {
           ) : (
             <ResponsiveContainer width="100%" height={380}>
               <ComposedChart
+                data={chartDataWithBenchmarks}
                 data={chartData}
                 margin={{ top: 10, right: 20, left: 10, bottom: 0 }}
                 onMouseMove={(state) => {
@@ -1620,6 +1821,68 @@ export default function PortfolioTracker() {
                     <Legend content={<CustomLegend />} />
                   </>
                 ) : (
+                  <>
+                    <Area
+                      type="monotone"
+                      dataKey="value"
+                      stroke={areaColor}
+                      strokeWidth={3}
+                      fill="url(#gArea)"
+                      animationDuration={1500}
+                      filter="url(#glow)"
+                      dot={(props) => {
+                        const isLast = props.index === chartDataWithBenchmarks.length - 1;
+                        if (!isLast)
+                          return <circle cx={props.cx} cy={props.cy} r={0} />;
+                        return (
+                          <g>
+                            <circle
+                              cx={props.cx}
+                              cy={props.cy}
+                              r={10}
+                              fill={areaColor}
+                              opacity={0.2}
+                              style={{ animation: "pulse-soft 2s infinite" }}
+                            />
+                            <circle
+                              cx={props.cx}
+                              cy={props.cy}
+                              r={4}
+                              fill="#fff"
+                            />
+                          </g>
+                        );
+                      }}
+                    />
+                    {(showSp500 || showNasdaq) && (
+                      <>
+                        {showSp500 && (
+                          <Line
+                            type="monotone"
+                            dataKey="sp500Compare"
+                            stroke="#f59e0b"
+                            strokeWidth={2}
+                            strokeDasharray="5 4"
+                            dot={false}
+                            connectNulls
+                            animationDuration={1200}
+                          />
+                        )}
+                        {showNasdaq && (
+                          <Line
+                            type="monotone"
+                            dataKey="nasdaqCompare"
+                            stroke="#22d3ee"
+                            strokeWidth={2}
+                            strokeDasharray="2 4"
+                            dot={false}
+                            connectNulls
+                            animationDuration={1200}
+                          />
+                        )}
+                      </>
+                    )}
+                  </>
                   <Area
                     type="monotone"
                     dataKey="value"
