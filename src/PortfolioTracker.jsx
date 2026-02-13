@@ -129,6 +129,20 @@ function parseCSV(text) {
 }
 
 const BENCHMARK_CACHE_KEY = "marketstack_benchmark_cache_v1";
+let benchmarkRequestPromise = null;
+
+function isValidBenchmarkSeries(series) {
+  return (
+    Array.isArray(series) &&
+    series.every(
+      (row) =>
+        row &&
+        typeof row.date === "string" &&
+        Number.isFinite(Number(row.close)) &&
+        Number(row.close) > 0
+    )
+  );
+}
 
 function getBenchmarkRefreshKey(now = new Date()) {
   const utc = new Date(now.toISOString());
@@ -142,14 +156,22 @@ function getBenchmarkRefreshKey(now = new Date()) {
 async function loadBenchmarksOncePerDay() {
   const refreshKey = getBenchmarkRefreshKey();
 
+  if (benchmarkRequestPromise) {
+    return benchmarkRequestPromise;
+  }
+
   try {
     const cachedRaw = window.localStorage.getItem(BENCHMARK_CACHE_KEY);
     if (cachedRaw) {
       const cached = JSON.parse(cachedRaw);
-      if (cached?.refreshKey === refreshKey) {
+      if (
+        cached?.refreshKey === refreshKey &&
+        isValidBenchmarkSeries(cached.sp500) &&
+        isValidBenchmarkSeries(cached.nasdaq)
+      ) {
         return {
-          sp500: Array.isArray(cached.sp500) ? cached.sp500 : [],
-          nasdaq: Array.isArray(cached.nasdaq) ? cached.nasdaq : [],
+          sp500: cached.sp500,
+          nasdaq: cached.nasdaq,
         };
       }
     }
@@ -157,47 +179,57 @@ async function loadBenchmarksOncePerDay() {
     // Ignore cache read errors and fetch fresh data.
   }
 
-  const accessKey = "046605c85cf4732b26bff18118d43f27";
-  const dateFrom = new Date();
-  dateFrom.setUTCFullYear(dateFrom.getUTCFullYear() - 2);
-  const dateFromStr = dateFrom.toISOString().slice(0, 10);
+  benchmarkRequestPromise = (async () => {
+    const accessKey = "046605c85cf4732b26bff18118d43f27";
+    const dateFrom = new Date();
+    dateFrom.setUTCFullYear(dateFrom.getUTCFullYear() - 2);
+    const dateFromStr = dateFrom.toISOString().slice(0, 10);
 
-  const res = await fetch(
-    `https://api.marketstack.com/v1/eod?access_key=${accessKey}&symbols=SPY,QQQ&sort=ASC&date_from=${dateFromStr}&limit=1000`
-  );
+    const res = await fetch(
+      `https://api.marketstack.com/v1/eod?access_key=${accessKey}&symbols=SPY,QQQ&sort=ASC&date_from=${dateFromStr}&limit=1000`
+    );
 
-  if (!res.ok) throw new Error("Failed benchmark fetch");
-  const data = await res.json();
-  const rows = Array.isArray(data?.data) ? data.data : [];
+    if (!res.ok) throw new Error("Failed benchmark fetch");
+    const data = await res.json();
+    const rows = Array.isArray(data?.data) ? data.data : [];
 
-  const mapped = rows
-    .map((r) => {
-      const symbol = String(r?.symbol || "").toUpperCase();
-      const rawDate = String(r?.date || "").slice(0, 10);
-      const close = Number(r?.close);
-      if (!rawDate || !Number.isFinite(close) || close <= 0) return null;
-      return { symbol, date: rawDate, close };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.date.localeCompare(b.date));
+    const mapped = rows
+      .map((r) => {
+        const symbol = String(r?.symbol || "").toUpperCase();
+        const rawDate = String(r?.date || "").slice(0, 10);
+        const close = Number(r?.close);
+        if (!rawDate || !Number.isFinite(close) || close <= 0) return null;
+        return { symbol, date: rawDate, close };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.date.localeCompare(b.date));
 
-  const sp500 = mapped
-    .filter((r) => r.symbol.startsWith("SPY"))
-    .map(({ date, close }) => ({ date, close }));
-  const nasdaq = mapped
-    .filter((r) => r.symbol.startsWith("QQQ"))
-    .map(({ date, close }) => ({ date, close }));
+    const sp500 = mapped
+      .filter((r) => r.symbol.startsWith("SPY"))
+      .map(({ date, close }) => ({ date, close }));
+    const nasdaq = mapped
+      .filter((r) => r.symbol.startsWith("QQQ"))
+      .map(({ date, close }) => ({ date, close }));
+
+    const payload = { sp500, nasdaq };
+
+    try {
+      window.localStorage.setItem(
+        BENCHMARK_CACHE_KEY,
+        JSON.stringify({ refreshKey, ...payload, fetchedAt: new Date().toISOString() })
+      );
+    } catch {
+      // Ignore cache write errors.
+    }
+
+    return payload;
+  })();
 
   try {
-    window.localStorage.setItem(
-      BENCHMARK_CACHE_KEY,
-      JSON.stringify({ refreshKey, sp500, nasdaq, fetchedAt: new Date().toISOString() })
-    );
-  } catch {
-    // Ignore cache write errors.
+    return await benchmarkRequestPromise;
+  } finally {
+    benchmarkRequestPromise = null;
   }
-
-  return { sp500, nasdaq };
 }
 
 // --- ANIMATED NUMBER COMPONENT ---
@@ -276,6 +308,8 @@ export default function PortfolioTracker() {
   }, []);
 
   useEffect(() => {
+    if (!showSp500 && !showNasdaq) return;
+
     const fetchBenchmarks = async () => {
       try {
         const data = await loadBenchmarksOncePerDay();
@@ -286,7 +320,7 @@ export default function PortfolioTracker() {
     };
 
     fetchBenchmarks();
-  }, []);
+  }, [showSp500, showNasdaq]);
 
   const sortedEntries = useMemo(
     () => [...entries].sort((a, b) => a.date.localeCompare(b.date)),
