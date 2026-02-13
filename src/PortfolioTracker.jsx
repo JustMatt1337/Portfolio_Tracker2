@@ -131,58 +131,28 @@ function parseCSV(text) {
 async function loadBenchmarkSeries(symbol) {
   try {
     const ticker = symbol.toUpperCase() === "SPY" ? "SPY" : "QQQ";
-    const yfUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5y&interval=1d`;
+    const accessKey = "046605c85cf4732b26bff18118d43f27";
 
-    const proxies = [
-      `https://api.allorigins.win/get?url=${encodeURIComponent(yfUrl)}`,
-      `https://corsproxy.io/?${encodeURIComponent(yfUrl)}`,
-    ];
+    // Pull a long enough history window for chart comparisons
+    const res = await fetch(
+      `https://api.marketstack.com/v1/eod?access_key=${accessKey}&symbols=${ticker}&limit=1000&sort=ASC&date_from=2018-01-01`
+    );
 
-    let parsedData = null;
+    if (!res.ok) throw new Error("Failed benchmark fetch");
+    const data = await res.json();
+    const rows = Array.isArray(data?.data) ? data.data : [];
 
-    for (const proxyUrl of proxies) {
-      try {
-        const res = await fetch(proxyUrl);
-        if (!res.ok) continue;
+    const parsed = rows
+      .map((r) => {
+        const rawDate = String(r?.date || "").slice(0, 10);
+        const close = Number(r?.close);
+        if (!rawDate || !Number.isFinite(close) || close <= 0) return null;
+        return { date: rawDate, close };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.date.localeCompare(b.date));
 
-        if (proxyUrl.includes("allorigins")) {
-          const wrapped = await res.json();
-          parsedData = wrapped?.contents ? JSON.parse(wrapped.contents) : null;
-        } else {
-          parsedData = await res.json();
-        }
-
-        if (parsedData?.chart) break;
-      } catch {
-        // Try next proxy
-      }
-    }
-
-    if (!parsedData?.chart?.result?.[0]) {
-      throw new Error("Failed to fetch benchmark data from proxies.");
-    }
-
-    const result = parsedData.chart.result[0];
-    const timestamps = result?.timestamp || [];
-    const closes = result?.indicators?.quote?.[0]?.close || [];
-
-    const parsed = [];
-    for (let i = 0; i < timestamps.length; i++) {
-      const close = closes[i];
-      if (close == null) continue;
-
-      const d = new Date(timestamps[i] * 1000);
-      const yyyy = d.getFullYear();
-      const mm = String(d.getMonth() + 1).padStart(2, "0");
-      const dd = String(d.getDate()).padStart(2, "0");
-
-      parsed.push({
-        date: `${yyyy}-${mm}-${dd}`,
-        close,
-      });
-    }
-
-    return parsed.sort((a, b) => a.date.localeCompare(b.date));
+    return parsed;
   } catch (err) {
     console.error(`Failed to fetch ${symbol}:`, err);
     return [];
