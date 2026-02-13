@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   ComposedChart,
   Line,
@@ -129,20 +129,25 @@ function parseCSV(text) {
 }
 
 // --- ANIMATED NUMBER COMPONENT ---
-const AnimatedNumber = ({ value }) => {
-  const [displayValue, setDisplayValue] = useState(0);
+const AnimatedNumber = ({ value, duration = 1200 }) => {
+  const [displayValue, setDisplayValue] = useState(value);
+  const prevValueRef = useRef(value);
 
   useEffect(() => {
-    let start = 0;
+    let animationFrame;
+    let start = prevValueRef.current;
     const end = value;
-    if (start === end) return;
-
-    if (Math.abs(end - start) < 10) {
-      setDisplayValue(end);
+    if (start === end) {
+      prevValueRef.current = value;
       return;
     }
 
-    const duration = 1200;
+    if (Math.abs(end - start) < 10) {
+      setDisplayValue(end);
+      prevValueRef.current = value;
+      return;
+    }
+
     const startTime = performance.now();
 
     const animate = (currentTime) => {
@@ -154,12 +159,17 @@ const AnimatedNumber = ({ value }) => {
       setDisplayValue(current);
 
       if (progress < 1) {
-        requestAnimationFrame(animate);
+        animationFrame = requestAnimationFrame(animate);
       }
     };
 
-    requestAnimationFrame(animate);
-  }, [value]);
+    animationFrame = requestAnimationFrame(animate);
+
+    prevValueRef.current = value;
+    return () => {
+      if (animationFrame) cancelAnimationFrame(animationFrame);
+    };
+  }, [value, duration]);
 
   return fmt(displayValue);
 };
@@ -177,6 +187,7 @@ export default function PortfolioTracker() {
 
   // NEW: State for tooltip to ensure it renders reliably
   const [hoveredMonthStats, setHoveredMonthStats] = useState(null);
+  const [scrubbedPoint, setScrubbedPoint] = useState(null);
 
   const fetchData = async () => {
     setLoading(true);
@@ -488,6 +499,32 @@ export default function PortfolioTracker() {
     };
   }, [sortedEntries, effectiveStart, view]);
 
+  const scrubbedHeaderStats = useMemo(() => {
+    if (!scrubbedPoint?.originalBalance) return null;
+
+    const scrubbedBalance = scrubbedPoint.originalBalance;
+    const scrubbedPnl = scrubbedBalance - effectiveStart;
+    const scrubbedPct =
+      effectiveStart > 0 ? (scrubbedPnl / effectiveStart) * 100 : 0;
+
+    return {
+      balance: scrubbedBalance,
+      pnl: scrubbedPnl,
+      pct: scrubbedPct,
+      date: scrubbedPoint.date,
+    };
+  }, [scrubbedPoint, effectiveStart]);
+
+  const activeHeaderBalance = scrubbedHeaderStats
+    ? scrubbedHeaderStats.balance
+    : stats.currentBalance;
+  const activeHeaderPnl = scrubbedHeaderStats
+    ? scrubbedHeaderStats.pnl
+    : stats.overallPnl;
+  const activeHeaderPct = scrubbedHeaderStats
+    ? scrubbedHeaderStats.pct
+    : stats.overallPct;
+
   // --- BUTTON HOVER STATS ---
   const allMonthFinals = useMemo(() => {
     const stats = {};
@@ -519,7 +556,7 @@ export default function PortfolioTracker() {
   }, [sortedEntries, monthsWithData]);
 
   // Theme Logic
-  const isWinning = stats.overallPnl >= 0;
+  const isWinning = activeHeaderPnl >= 0;
 
   const themeColors = isWinning
     ? {
@@ -988,10 +1025,21 @@ export default function PortfolioTracker() {
                   >
                     $
                   </span>
-                  <AnimatedNumber value={stats.currentBalance} />
+                  <AnimatedNumber
+                    value={activeHeaderBalance}
+                    duration={scrubbedHeaderStats ? 180 : 1200}
+                  />
                 </>
               )}
             </h1>
+            {scrubbedHeaderStats && (
+              <div
+                className="mono-num"
+                style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}
+              >
+                Scrubbing {formatDatePretty(scrubbedHeaderStats.date)}
+              </div>
+            )}
           </div>
 
           <div
@@ -1065,12 +1113,12 @@ export default function PortfolioTracker() {
                       : semanticColors.negative,
                   }}
                 >
-                  {stats.overallPnl >= 0 ? "+" : ""}
-                  {privacyMode ? "****" : fmt(stats.overallPnl)}
-                  <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 6 }}>
-                    ({stats.overallPct.toFixed(2)}%)
-                  </span>
-                </div>
+                    {activeHeaderPnl >= 0 ? "+" : ""}
+                    {privacyMode ? "****" : fmt(activeHeaderPnl)}
+                    <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 6 }}>
+                    ({activeHeaderPct.toFixed(2)}%)
+                    </span>
+                  </div>
               </div>
 
               <div style={{ textAlign: "right" }}>
@@ -1438,6 +1486,16 @@ export default function PortfolioTracker() {
               <ComposedChart
                 data={chartData}
                 margin={{ top: 10, right: 20, left: 10, bottom: 0 }}
+                onMouseMove={(state) => {
+                  if (view === "overlay") return;
+                  const p = state?.activePayload?.[0]?.payload;
+                  if (p?.isBaseline) {
+                    setScrubbedPoint(null);
+                    return;
+                  }
+                  setScrubbedPoint(p ?? null);
+                }}
+                onMouseLeave={() => setScrubbedPoint(null)}
               >
                 <defs>
                   <linearGradient id="gArea" x1="0" y1="0" x2="0" y2="1">
