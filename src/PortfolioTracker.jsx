@@ -12,6 +12,7 @@ import {
   ReferenceLine,
 } from "recharts";
 
+// --- CONSTANTS & CONFIG ---
 const MONTHS = [
   "Jan",
   "Feb",
@@ -136,14 +137,17 @@ const AnimatedNumber = ({ value }) => {
     const end = value;
     if (start === end) return;
 
-    const duration = 800; // 0.8s animation
+    if (Math.abs(end - start) < 10) {
+      setDisplayValue(end);
+      return;
+    }
+
+    const duration = 1200;
     const startTime = performance.now();
 
     const animate = (currentTime) => {
       const elapsed = currentTime - startTime;
       const progress = Math.min(elapsed / duration, 1);
-
-      // Ease-out expo function for smooth landing
       const ease = progress === 1 ? 1 : 1 - Math.pow(2, -10 * progress);
 
       const current = start + (end - start) * ease;
@@ -169,8 +173,10 @@ export default function PortfolioTracker() {
   const [privacyMode, setPrivacyMode] = useState(false);
   const [hiddenMonths, setHiddenMonths] = useState(new Set());
   const [highlightedMonth, setHighlightedMonth] = useState(null);
-  // metric: 'value' | 'profit' | 'percent'
   const [metric, setMetric] = useState("value");
+
+  // NEW: State for tooltip to ensure it renders reliably
+  const [hoveredMonthStats, setHoveredMonthStats] = useState(null);
 
   const fetchData = async () => {
     setLoading(true);
@@ -267,10 +273,9 @@ export default function PortfolioTracker() {
     if (view === "overlay") {
       const dayMap = new Map();
 
-      // 1. Calculate Baselines (Start of month = End of prev month)
+      // 1. Calculate Baselines
       const monthBaselines = {};
       MONTHS.forEach((_, mIdx) => {
-        // Find last entry of previous month
         const prevMonthEntries = sortedEntries.filter((e) => {
           const d = new Date(e.date + "T00:00:00");
           return d.getMonth() === mIdx - 1;
@@ -280,7 +285,6 @@ export default function PortfolioTracker() {
           monthBaselines[mIdx] =
             prevMonthEntries[prevMonthEntries.length - 1].balance;
         } else {
-          // Fallback for very first month data point
           const thisMonthEntries = sortedEntries.filter(
             (e) => new Date(e.date + "T00:00:00").getMonth() === mIdx
           );
@@ -290,7 +294,7 @@ export default function PortfolioTracker() {
         }
       });
 
-      // 2. Initialize Day 0 for all active months with baseline
+      // 2. Initialize Day 0
       const day0 = { label: "0" };
       monthsWithData.forEach((mIdx) => {
         const monthName = MONTHS[mIdx];
@@ -303,7 +307,7 @@ export default function PortfolioTracker() {
       });
       dayMap.set("0", day0);
 
-      // 3. Process actual entries
+      // 3. Process entries
       sortedEntries.forEach((e) => {
         const dObj = new Date(e.date + "T00:00:00");
         const dayKey = String(dObj.getDate()).padStart(2, "0");
@@ -339,7 +343,6 @@ export default function PortfolioTracker() {
       dataToProcess = sortedEntries;
       baseline = effectiveStart;
     } else {
-      // Single Month
       const mi = parseInt(view);
       dataToProcess = sortedEntries.filter(
         (e) => new Date(e.date + "T00:00:00").getMonth() === mi
@@ -355,13 +358,11 @@ export default function PortfolioTracker() {
 
     if (!dataToProcess.length) return [];
 
-    // Map entries based on view and metric
     const mapped = dataToProcess.map((e) => {
       let val = e.balance;
       const target = effectiveStart * 100;
 
       if (view === "100x" && metric === "percent") {
-        // Special case: 100x view percentage is based on Goal target
         val = (e.balance / target) * 100;
       } else if (metric === "profit") {
         val = e.balance - baseline;
@@ -375,20 +376,14 @@ export default function PortfolioTracker() {
             ? formatDatePretty(e.date)
             : e.date.slice(8),
         date: e.date,
-        originalBalance: e.balance, // Keep for tooltips
+        originalBalance: e.balance,
         value: val,
         isBaseline: false,
       };
     });
 
-    // Prepend "Start" point logic
     if (view !== "overall" && view !== "100x" && dataToProcess.length > 0) {
       if (metric !== "value") {
-        // Profit/Percent mode
-
-        // FIX: Only prepend a "Start" point if the first data point is significantly different from 0.
-        // If the first point is effectively 0 (the start of the month/challenge),
-        // prepending another 0 point creates an ugly flat line.
         if (Math.abs(mapped[0].value) > 0.0001) {
           const firstDate = new Date(dataToProcess[0].date);
           const prevDate = new Date(firstDate);
@@ -403,7 +398,6 @@ export default function PortfolioTracker() {
           });
         }
       } else {
-        // Value mode: prepend previous balance
         const firstEntryIdx = sortedEntries.indexOf(dataToProcess[0]);
         const prevEntry =
           firstEntryIdx > 0 ? sortedEntries[firstEntryIdx - 1] : null;
@@ -494,11 +488,9 @@ export default function PortfolioTracker() {
     };
   }, [sortedEntries, effectiveStart, view]);
 
-  // --- BUTTON HOVER STATS (Pre-calculate for all months) ---
+  // --- BUTTON HOVER STATS ---
   const allMonthFinals = useMemo(() => {
     const stats = {};
-
-    // We only care about months that actually have data
     monthsWithData.forEach((mIdx) => {
       const mStr = MONTHS[mIdx];
       const me = sortedEntries.filter(
@@ -507,8 +499,6 @@ export default function PortfolioTracker() {
       if (!me.length) return;
 
       const lastEntry = me[me.length - 1];
-
-      // Calculate baseline for this month (same logic as before)
       const prevMonthEntries = sortedEntries.filter(
         (e) => new Date(e.date + "T00:00:00").getMonth() === mIdx - 1
       );
@@ -525,31 +515,27 @@ export default function PortfolioTracker() {
         percent: base > 0 ? ((lastEntry.balance - base) / base) * 100 : 0,
       };
     });
-
     return stats;
   }, [sortedEntries, monthsWithData]);
 
-  // Determine line color based on logic
-  const isPositive =
-    chartData.length > 0 && chartData[chartData.length - 1].value >= 0;
-  // If in 'value' mode, we compare to first point, otherwise compare to 0
-  const isPositiveValue =
-    chartData.length > 0 &&
-    chartData[chartData.length - 1].value >=
-      (metric === "value" ? chartData[0].value : 0);
+  // Theme Logic
+  const isWinning = stats.overallPnl >= 0;
 
-  const areaColor = isPositiveValue ? "#4caf7c" : "#e05555";
+  const themeColors = isWinning
+    ? {
+        primary: "#10b981", // Emerald 500
+        secondary: "#3b82f6", // Blue 500
+        glow: "rgba(16, 185, 129, 0.4)",
+      }
+    : {
+        primary: "#ef4444", // Red 500
+        secondary: "#8b5cf6", // Violet 500
+        glow: "rgba(239, 68, 68, 0.4)",
+      };
 
-  const copyStats = () => {
-    const text = `🎯 100x Update\nCurrent: $${fmt(
-      stats.currentBalance
-    )}\nP&L: ${stats.overallPnl >= 0 ? "+" : ""}$${fmt(
-      stats.overallPnl
-    )} (${stats.overallPct.toFixed(2)}%)\nProgress: ${(
-      (stats.overallMulti / 100) *
-      100
-    ).toFixed(2)}% to 100x`;
-    navigator.clipboard.writeText(text).then(() => alert("Stats copied!"));
+  const semanticColors = {
+    positive: "#10b981",
+    negative: "#ef4444",
   };
 
   const CustomLegend = ({ payload }) => {
@@ -562,6 +548,7 @@ export default function PortfolioTracker() {
           justifyContent: "center",
           padding: "10px 0 0",
           fontSize: 11,
+          fontFamily: "'JetBrains Mono', monospace",
         }}
       >
         {payload.map((entry) => {
@@ -586,17 +573,22 @@ export default function PortfolioTracker() {
                 opacity: isHidden ? 0.3 : 1,
                 padding: "4px 8px",
                 borderRadius: 4,
-                background: isHighlighted ? "#ffffff08" : "transparent",
+                background: isHighlighted
+                  ? "rgba(255,255,255,0.08)"
+                  : "transparent",
                 transition: "all 0.2s",
+                border: isHighlighted
+                  ? `1px solid ${entry.color}`
+                  : "1px solid transparent",
               }}
             >
               <div
                 style={{
-                  width: 12,
-                  height: 12,
+                  width: 8,
+                  height: 8,
                   borderRadius: "50%",
                   background: entry.color,
-                  border: isHighlighted ? "2px solid white" : "none",
+                  boxShadow: isHighlighted ? `0 0 8px ${entry.color}` : "none",
                 }}
               />
               <span
@@ -625,18 +617,16 @@ export default function PortfolioTracker() {
       if (!validPayload.length) return null;
 
       return (
-        <div
-          style={{
-            background: "rgba(14,14,20,0.9)",
-            backdropFilter: "blur(10px)",
-            border: "1px solid rgba(255,255,255,0.1)",
-            borderRadius: 8,
-            padding: "10px",
-            minWidth: 150,
-          }}
-        >
-          <div style={{ color: "#888", fontSize: 11, marginBottom: 5 }}>
-            Day {label}
+        <div className="glass-tooltip">
+          <div
+            style={{
+              color: "#888",
+              fontSize: 11,
+              marginBottom: 8,
+              fontFamily: "'Inter', sans-serif",
+            }}
+          >
+            Day {label} Comparison
           </div>
           {validPayload
             .sort((a, b) => b.value - a.value)
@@ -647,10 +637,11 @@ export default function PortfolioTracker() {
                   display: "flex",
                   justifyContent: "space-between",
                   fontSize: 12,
-                  marginBottom: 3,
+                  marginBottom: 4,
+                  fontFamily: "'JetBrains Mono', monospace",
                 }}
               >
-                <span style={{ color: p.color, marginRight: 10 }}>
+                <span style={{ color: p.color, marginRight: 12 }}>
                   {p.name}:
                 </span>
                 <span style={{ color: "#e8e8e8", fontWeight: 600 }}>
@@ -669,28 +660,25 @@ export default function PortfolioTracker() {
 
     if (d.isBaseline) {
       return (
-        <div
-          style={{
-            background: "rgba(14,14,20,0.9)",
-            backdropFilter: "blur(10px)",
-            border: "1px solid rgba(255,255,255,0.1)",
-            borderRadius: 8,
-            padding: "10px 14px",
-            boxShadow: "0 4px 24px rgba(0,0,0,0.6)",
-            minWidth: 175,
-          }}
-        >
+        <div className="glass-tooltip">
           <div
             style={{
-              color: "#666",
+              color: "#aaa",
               fontSize: 11,
               fontStyle: "italic",
               marginBottom: 5,
+              fontFamily: "'Inter', sans-serif",
             }}
           >
             Starting Point
           </div>
-          <div style={{ color: "#888", fontSize: 13 }}>
+          <div
+            style={{
+              color: "#fff",
+              fontSize: 13,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
             {privacyMode ? "$ ****" : `$${fmt(d.originalBalance)}`}
           </div>
         </div>
@@ -710,39 +698,38 @@ export default function PortfolioTracker() {
     }
 
     return (
-      <div
-        style={{
-          background: "rgba(14,14,20,0.9)",
-          backdropFilter: "blur(10px)",
-          border: "1px solid rgba(255,255,255,0.1)",
-          borderRadius: 8,
-          padding: "10px 14px",
-          boxShadow: "0 4px 24px rgba(0,0,0,0.6)",
-          minWidth: 175,
-        }}
-      >
+      <div className="glass-tooltip">
         <div
           style={{
-            color: "#555",
+            color: "#888",
             fontSize: 11,
-            marginBottom: 5,
-            fontFamily: "'Courier New',monospace",
+            marginBottom: 6,
+            fontFamily: "'JetBrains Mono', monospace",
+            letterSpacing: "-0.5px",
           }}
         >
           {formatDatePretty(d.date)}
         </div>
         <div
           style={{
-            color: "#e8e8e8",
-            fontSize: 14,
-            fontWeight: 600,
-            marginBottom: 3,
+            color: "#fff",
+            fontSize: 15,
+            fontWeight: 700,
+            marginBottom: 4,
+            fontFamily: "'JetBrains Mono', monospace",
+            textShadow: "0 2px 10px rgba(0,0,0,0.5)",
           }}
         >
           {mainValueDisplay}
         </div>
         {metric !== "value" && (
-          <div style={{ color: "#666", fontSize: 11 }}>
+          <div
+            style={{
+              color: "rgba(255,255,255,0.5)",
+              fontSize: 11,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
             Bal: {privacyMode ? "****" : `$${fmt(d.originalBalance)}`}
           </div>
         )}
@@ -751,7 +738,8 @@ export default function PortfolioTracker() {
   };
 
   const getAxisTickFormatter = (val) => {
-    if (privacyMode && metric === "value") return "****";
+    if (privacyMode && (metric === "value" || metric === "profit"))
+      return "****";
     if (metric === "percent") return `${val.toFixed(0)}%`;
     if (metric === "profit") {
       return (
@@ -759,345 +747,458 @@ export default function PortfolioTracker() {
         (Math.abs(val) >= 1000 ? (val / 1000).toFixed(1) + "k" : val)
       );
     }
-    // Value mode
     return val >= 1000 ? (val / 1000).toFixed(1) + "K" : val.toLocaleString();
   };
 
-  // Calculate domain for 100x view based on metric
   const get100xDomain = () => {
     if (view !== "100x") return ["auto", "auto"];
     const target = effectiveStart * 100;
     if (metric === "percent") return [0, 100];
     if (metric === "profit") return [0, target - effectiveStart];
-    // value mode
     return [0, Math.max(target, stats.currentBalance * 1.1)];
   };
+
+  // Check last data point for color logic
+  const isPositiveValue =
+    chartData.length > 0 &&
+    chartData[chartData.length - 1].value >=
+      (metric === "value" ? chartData[0].value : 0);
+  const areaColor = isPositiveValue ? themeColors.primary : "#ef4444";
+
+  // Is a specific month selected?
+  const isMonthView = !["overall", "100x", "overlay"].includes(view);
+  const selectedMonthName = isMonthView ? MONTHS[parseInt(view)] : "";
 
   return (
     <div
       style={{
-        background: "#0e0e14",
+        background: "#050505",
         minHeight: "100vh",
-        padding: "28px 16px 24px",
-        fontFamily: "'Segoe UI',sans-serif",
-        color: "#ccc",
+        fontFamily: "'Inter', sans-serif",
+        color: "#e2e8f0",
+        position: "relative",
+        overflow: "hidden",
       }}
     >
+      {/* GLOBAL STYLES & FONTS */}
       <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+        /* ANIMATIONS */
+        @keyframes aurora-1 {
+          0% { transform: translate(0, 0) scale(1); opacity: 0.12; }
+          33% { transform: translate(30px, -50px) scale(1.1); opacity: 0.15; }
+          66% { transform: translate(-20px, 20px) scale(0.9); opacity: 0.12; }
+          100% { transform: translate(0, 0) scale(1); opacity: 0.12; }
+        }
+        @keyframes aurora-2 {
+          0% { transform: translate(0, 0) scale(1); opacity: 0.1; }
+          50% { transform: translate(-40px, 30px) scale(1.2); opacity: 0.15; }
+          100% { transform: translate(0, 0) scale(1); opacity: 0.1; }
+        }
         @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes pulse {
-          0% { stroke-width: 0px; stroke-opacity: 1; }
-          50% { stroke-width: 8px; stroke-opacity: 0.5; }
-          100% { stroke-width: 0px; stroke-opacity: 1; }
-        }
-        /* ENTRY ANIMATION */
-        @keyframes fadeIn {
-          from { opacity: 0; transform: translateY(20px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pulse-soft { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
+
+        /* CLASSES */
         .animate-in {
-          animation: fadeIn 0.6s ease-out forwards;
-          opacity: 0; 
+          animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          opacity: 0;
         }
         
-        /* LEGEND ANIMATION */
-        .legend-val {
-          animation: slideRight 0.2s ease-out forwards;
-          display: inline-block;
-        }
-        @keyframes slideRight {
-          from { opacity: 0; transform: translateX(-5px); }
-          to { opacity: 1; transform: translateX(0); }
-        }
-
-        /* Custom Scrollbar */
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: #0e0e14; }
-        ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: #444; }
-        
-        /* Mobile Scrollable Buttons */
-        @media (max-width: 768px) {
-          .month-buttons-container { overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; scrollbar-width: thin; padding-bottom: 5px; }
-          .month-buttons { flex-wrap: nowrap !important; min-width: min-content; }
-        }
-
-        /* GLASS & GRADIENT STYLES */
         .glass-panel {
-          background: rgba(17, 17, 24, 0.7);
-          backdrop-filter: blur(12px);
-          border: 1px solid rgba(255, 255, 255, 0.08);
-          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+          background: rgba(20, 20, 24, 0.6);
+          backdrop-filter: blur(24px);
+          -webkit-backdrop-filter: blur(24px);
+          /* BORDER REMOVED AS REQUESTED */
+          border: none;
+          box-shadow: 0 20px 40px -10px rgba(0,0,0,0.5);
         }
-        .gradient-text {
-          background: linear-gradient(90deg, #4caf7c, #22c55e);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
+
+        .glass-tooltip {
+          background: rgba(10, 10, 12, 0.9);
+          backdrop-filter: blur(16px);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 12px;
+          padding: 12px 16px;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+          min-width: 160px;
         }
-        .gradient-text-red {
-          background: linear-gradient(90deg, #ef5350, #f43f5e);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
+
+        .mono-num { font-family: 'JetBrains Mono', monospace; }
+        
+        .toggle-btn {
+          background: rgba(255,255,255,0.03);
+          border: none;
+          color: #64748b;
+          padding: 6px 14px;
+          font-size: 11px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          font-family: 'Inter', sans-serif;
+          letter-spacing: 0.5px;
         }
-         .toggle-btn {
-             background: #1a1a24; border: 1px solid #2a2a3a; color: #666; padding: 5px 12px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.2s;
-        }
+        .toggle-btn:hover { color: #94a3b8; background: rgba(255,255,255,0.06); }
         .toggle-btn.active {
-            background: #2a2a3a; color: #fff; border-color: #555;
+          background: rgba(255,255,255,0.1);
+          color: #f8fafc;
         }
-        .toggle-group {
-            display: flex; border-radius: 6px; overflow: hidden; border: 1px solid #2a2a3a;
+
+        .nav-btn {
+            position: relative;
+            background: rgba(20, 20, 24, 0.4);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 8px;
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 500;
+            color: #94a3b8;
+            cursor: pointer;
+            transition: all 0.2s;
         }
-        .toggle-group .toggle-btn { border: none; border-right: 1px solid #2a2a3a; border-radius: 0; }
-        .toggle-group .toggle-btn:last-child { border-right: none; }
+        .nav-btn:hover {
+            background: rgba(255,255,255,0.08);
+            color: #fff;
+            border-color: rgba(255,255,255,0.1);
+        }
+        .nav-btn.active {
+            background: rgba(255,255,255,0.12);
+            color: #fff;
+            border-color: rgba(255,255,255,0.15);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        }
+
+        /* SCROLLBAR */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
         body { 
-            margin: 0;
+          margin: 0;
         }
       `}</style>
-      <div style={{ maxWidth: 1280, margin: "0 auto" }}>
-        {/* HEADER */}
+
+      {/* --- AURORA BACKGROUND --- */}
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 0,
+          pointerEvents: "none",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: "-10%",
+            left: "10%",
+            width: "50vw",
+            height: "50vw",
+            background: `radial-gradient(circle, ${themeColors.primary} 0%, transparent 70%)`,
+            filter: "blur(120px)",
+            opacity: 0.12,
+            animation: "aurora-1 20s ease-in-out infinite alternate",
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            bottom: "10%",
+            right: "-10%",
+            width: "40vw",
+            height: "40vw",
+            background: `radial-gradient(circle, ${themeColors.secondary} 0%, transparent 70%)`,
+            filter: "blur(100px)",
+            opacity: 0.1,
+            animation: "aurora-2 15s ease-in-out infinite alternate",
+          }}
+        />
+      </div>
+
+      {/* --- CONTENT CONTAINER --- */}
+      <div
+        style={{
+          position: "relative",
+          zIndex: 1,
+          maxWidth: 1200,
+          margin: "0 auto",
+          padding: "40px 20px",
+        }}
+      >
+        {/* HEADER AREA */}
         <div
           className="animate-in"
           style={{
             display: "flex",
             justifyContent: "space-between",
-            alignItems: "flex-start",
-            marginBottom: 6,
+            alignItems: "flex-end",
+            marginBottom: 30,
           }}
         >
           <div>
-            <h1
+            <div
               style={{
-                fontSize: 22,
-                fontWeight: 700,
-                color: "#e8e8e8",
-                margin: 0,
-                letterSpacing: "-0.5px",
-              }}
-            >
-              100x Challenge
-            </h1>
-            <span style={{ fontSize: 11, color: "#444" }}>
-              {effectiveStart > 0 ? (
-                <span>
-                  Starting: {privacyMode ? "$ ****" : `$${fmt(effectiveStart)}`}{" "}
-                  · Target:{" "}
-                  {privacyMode ? "$ ****" : `$${fmt(effectiveStart * 100)}`}
-                </span>
-              ) : (
-                "Loading..."
-              )}
-            </span>
-          </div>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            {/* METRIC TOGGLE */}
-            <div className="toggle-group">
-              <button
-                className={`toggle-btn ${metric === "value" ? "active" : ""}`}
-                onClick={() => setMetric("value")}
-              >
-                Value $
-              </button>
-              <button
-                className={`toggle-btn ${metric === "profit" ? "active" : ""}`}
-                onClick={() => setMetric("profit")}
-              >
-                Profit $
-              </button>
-              <button
-                className={`toggle-btn ${metric === "percent" ? "active" : ""}`}
-                onClick={() => setMetric("percent")}
-              >
-                Growth %
-              </button>
-            </div>
-
-            <button
-              onClick={() => setPrivacyMode(!privacyMode)}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: privacyMode ? "#4caf7c" : "#555",
-                cursor: "pointer",
-                fontSize: 16,
-              }}
-            >
-              {privacyMode ? "👁️‍🗨️" : "👁️"}
-            </button>
-            <button
-              onClick={copyStats}
-              style={{
-                background: "#1a1a24",
-                border: "1px solid #2a2a3a",
-                borderRadius: 6,
-                color: "#666",
-                padding: "5px 10px",
-                fontSize: 11,
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
-              📋
-            </button>
-            <button
-              onClick={fetchData}
-              disabled={loading}
-              style={{
-                background: "#1a1a24",
-                border: "1px solid #2a2a3a",
-                borderRadius: 6,
-                color: loading ? "#444" : "#5b9bd5",
-                padding: "5px 10px",
-                fontSize: 11,
-                fontWeight: 600,
-                cursor: "pointer",
                 display: "flex",
                 alignItems: "center",
-                gap: 5,
+                gap: 8,
+                marginBottom: 4,
               }}
             >
-              {loading ? (
-                <div
-                  style={{
-                    width: 10,
-                    height: 10,
-                    borderRadius: "50%",
-                    border: "2px solid #444",
-                    borderTopColor: "#5b9bd5",
-                    animation: "spin 1s linear infinite",
-                  }}
-                />
-              ) : (
-                "↻"
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* TOP STATS */}
-        <div
-          className="animate-in"
-          style={{
-            display: "flex",
-            gap: 20,
-            flexWrap: "wrap",
-            alignItems: "center",
-            marginBottom: 14,
-            marginTop: 10,
-            animationDelay: "0.1s",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span style={{ fontSize: 11, color: "#444" }}>Current:</span>
-            <span
-              style={{ fontSize: 13, fontWeight: 600 }}
-              className={
-                stats.overallPnl >= 0 ? "gradient-text" : "gradient-text-red"
-              }
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: "1px",
+                  textTransform: "uppercase",
+                  color: themeColors.primary,
+                  border: `1px solid ${themeColors.primary}`,
+                  padding: "2px 6px",
+                  borderRadius: 4,
+                }}
+              >
+                LIVE
+              </span>
+              <span style={{ fontSize: 13, color: "#94a3b8", fontWeight: 500 }}>
+                100x Challenge
+              </span>
+            </div>
+            <h1
+              className="mono-num"
+              style={{
+                fontSize: 48,
+                fontWeight: 600,
+                margin: 0,
+                letterSpacing: "-1.5px",
+                color: "#fff",
+                lineHeight: 1,
+              }}
             >
               {privacyMode ? (
-                "$ ****"
+                "****"
               ) : (
                 <>
-                  $<AnimatedNumber value={stats.currentBalance} />
+                  <span
+                    style={{
+                      fontSize: 28,
+                      verticalAlign: "top",
+                      marginRight: 4,
+                      opacity: 0.6,
+                    }}
+                  >
+                    $
+                  </span>
+                  <AnimatedNumber value={stats.currentBalance} />
                 </>
               )}
-            </span>
-            <span
-              style={{
-                fontSize: 12,
-                color: stats.overallPnl >= 0 ? "#4caf7c" : "#e05555",
-                fontWeight: 600,
-              }}
-            >
-              {stats.overallPnl >= 0 ? "+" : ""}
-              {privacyMode ? "$ ****" : `$${fmt(stats.overallPnl)}`}(
-              {stats.overallPnl >= 0 ? "+" : ""}
-              {stats.overallPct.toFixed(2)}%)
-            </span>
-            <span style={{ fontSize: 11, color: "#555" }}>
-              {stats.overallMulti.toFixed(2)}x
-            </span>
+            </h1>
           </div>
 
-          {/* Month Stats */}
-          {view !== "overall" && view !== "100x" && view !== "overlay" && (
-            <>
-              <div style={{ width: 1, height: 18, background: "#2a2a3a" }} />
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 11, color: "#444" }}>
-                  {MONTHS[parseInt(view)]}:
-                </span>
-                <span
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "flex-end",
+              gap: 12,
+            }}
+          >
+            {/* STATS ROW */}
+            <div style={{ display: "flex", gap: 24, alignItems: "flex-end" }}>
+              {isMonthView && (
+                <div
                   style={{
-                    fontSize: 12,
-                    color: stats.monthPnl >= 0 ? "#4caf7c" : "#e05555",
-                    fontWeight: 600,
+                    textAlign: "right",
+                    borderRight: "1px solid rgba(255,255,255,0.1)",
+                    paddingRight: 24,
                   }}
                 >
-                  {stats.monthPnl >= 0 ? "+" : ""}
-                  {privacyMode ? "$ ****" : `$${fmt(stats.monthPnl)}`}(
-                  {stats.monthPnl >= 0 ? "+" : ""}
-                  {stats.monthPct.toFixed(2)}%)
-                </span>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "#64748b",
+                      fontWeight: 600,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.5px",
+                    }}
+                  >
+                    {selectedMonthName}
+                  </div>
+                  <div
+                    className="mono-num"
+                    style={{
+                      fontSize: 16,
+                      fontWeight: 600,
+                      color:
+                        stats.monthPnl >= 0
+                          ? semanticColors.positive
+                          : semanticColors.negative,
+                    }}
+                  >
+                    {stats.monthPnl >= 0 ? "+" : ""}
+                    {privacyMode ? "****" : fmt(stats.monthPnl)}
+                    <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 6 }}>
+                      ({stats.monthPct.toFixed(2)}%)
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ textAlign: "right" }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "#64748b",
+                    fontWeight: 600,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.5px",
+                  }}
+                >
+                  Total P&L
+                </div>
+                <div
+                  className="mono-num"
+                  style={{
+                    fontSize: 16,
+                    fontWeight: 600,
+                    color: isWinning
+                      ? semanticColors.positive
+                      : semanticColors.negative,
+                  }}
+                >
+                  {stats.overallPnl >= 0 ? "+" : ""}
+                  {privacyMode ? "****" : fmt(stats.overallPnl)}
+                  <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 6 }}>
+                    ({stats.overallPct.toFixed(2)}%)
+                  </span>
+                </div>
               </div>
-            </>
-          )}
+
+              <div style={{ textAlign: "right" }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "#64748b",
+                    fontWeight: 600,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.5px",
+                  }}
+                >
+                  Multiple
+                </div>
+                <div
+                  className="mono-num"
+                  style={{ fontSize: 16, fontWeight: 600, color: "#e2e8f0" }}
+                >
+                  {stats.overallMulti.toFixed(2)}x
+                </div>
+              </div>
+            </div>
+
+            {/* CONTROLS */}
+            <div
+              className="glass-panel"
+              style={{ display: "flex", padding: 4, borderRadius: 8, gap: 4 }}
+            >
+              <div
+                style={{ display: "flex", borderRadius: 4, overflow: "hidden" }}
+              >
+                <button
+                  className={`toggle-btn ${metric === "value" ? "active" : ""}`}
+                  onClick={() => setMetric("value")}
+                >
+                  Value
+                </button>
+                <button
+                  className={`toggle-btn ${
+                    metric === "profit" ? "active" : ""
+                  }`}
+                  onClick={() => setMetric("profit")}
+                >
+                  Profit
+                </button>
+                <button
+                  className={`toggle-btn ${
+                    metric === "percent" ? "active" : ""
+                  }`}
+                  onClick={() => setMetric("percent")}
+                >
+                  %
+                </button>
+              </div>
+              <div
+                style={{
+                  width: 1,
+                  background: "rgba(255,255,255,0.1)",
+                  margin: "2px 0",
+                }}
+              />
+              <button
+                onClick={() => setPrivacyMode(!privacyMode)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: privacyMode ? themeColors.primary : "#64748b",
+                  cursor: "pointer",
+                  padding: "0 8px",
+                  fontSize: 14,
+                }}
+              >
+                {privacyMode ? "👁️‍🗨️" : "👁️"}
+              </button>
+              <button
+                onClick={fetchData}
+                disabled={loading}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "#64748b",
+                  cursor: "pointer",
+                  padding: "0 8px",
+                  fontSize: 14,
+                }}
+              >
+                {loading ? "↻" : "⟳"}
+              </button>
+            </div>
+          </div>
         </div>
 
-        {/* PROGRESS BAR */}
+        {/* PROGRESS HUD */}
         {effectiveStart > 0 && stats.currentBalance > 0 && (
           <div
             className="glass-panel animate-in"
             style={{
-              marginBottom: 24,
-              padding: "12px 16px",
-              borderRadius: 8,
-              animationDelay: "0.2s",
+              marginBottom: 30,
+              padding: "16px 20px",
+              borderRadius: 16,
+              animationDelay: "0.1s",
             }}
           >
             <div
               style={{
                 display: "flex",
                 justifyContent: "space-between",
-                alignItems: "flex-end",
-                marginBottom: 6,
+                marginBottom: 8,
+                fontSize: 12,
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontWeight: 600, color: "#ccc" }}>
-                  Progress to 100x
-                </span>
-                {stats.projectedDate && (
-                  <span
-                    style={{
-                      color: "#5b9bd5",
-                      background: "#5b9bd515",
-                      padding: "2px 6px",
-                      borderRadius: 4,
-                      fontSize: 10.5,
-                    }}
-                  >
-                    🚀 ETA: {stats.projectedDate}
-                  </span>
-                )}
-                {stats.avgDailyGrowth > 0 && (
-                  <span style={{ color: "#555", fontSize: 10.5 }}>
-                    (Avg: +{(stats.avgDailyGrowth * 100).toFixed(2)}% / day)
-                  </span>
-                )}
-              </div>
-              <div style={{ fontSize: 11, color: "#ccc" }}>
-                {stats.overallMulti.toFixed(2)}x{" "}
-                <span style={{ color: "#555" }}>/</span> 100x
-              </div>
+              <span style={{ color: "#94a3b8" }}>
+                Progress to Target (
+                {privacyMode ? "$****" : `$${fmt(effectiveStart * 100)}`})
+              </span>
+              <span
+                className="mono-num"
+                style={{ color: themeColors.secondary, fontWeight: 600 }}
+              >
+                {((stats.overallMulti / 100) * 100).toFixed(3)}%
+              </span>
             </div>
 
             <div
               style={{
-                height: 6,
-                background: "#1a1a24",
-                borderRadius: 3,
+                height: 8,
+                background: "rgba(255,255,255,0.05)",
+                borderRadius: 4,
                 overflow: "hidden",
                 position: "relative",
               }}
@@ -1105,279 +1206,310 @@ export default function PortfolioTracker() {
               <div
                 style={{
                   height: "100%",
-                  borderRadius: 3,
                   width: `${Math.min(100, (stats.overallMulti / 100) * 100)}%`,
-                  background: "linear-gradient(90deg,#4caf7c,#5b9bd5)",
-                  transition: "width 0.6s ease",
+                  background: `linear-gradient(90deg, ${themeColors.primary}, ${themeColors.secondary})`,
+                  boxShadow: `0 0 10px ${themeColors.glow}`,
+                  borderRadius: 4,
+                  transition: "width 1s cubic-bezier(0.4, 0, 0.2, 1)",
                 }}
               />
             </div>
 
-            <div
-              style={{
-                textAlign: "right",
-                fontSize: 10,
-                color: "#5b9bd5",
-                marginTop: 4,
-                fontWeight: 600,
-              }}
-            >
-              {((stats.overallMulti / 100) * 100).toFixed(2)}% Complete
-            </div>
+            {stats.projectedDate && (
+              <div
+                style={{
+                  marginTop: 8,
+                  fontSize: 11,
+                  color: "#64748b",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                <span
+                  style={{
+                    display: "inline-block",
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: themeColors.secondary,
+                    animation: "pulse-soft 2s infinite",
+                  }}
+                />
+                {/* TEXT REVERTED HERE */}
+                Target hit by{" "}
+                <span style={{ color: "#e2e8f0" }}>
+                  {stats.projectedDate}
+                </span>{" "}
+                based on current velocity.
+              </div>
+            )}
           </div>
         )}
 
-        {/* VIEW CONTROLS */}
+        {/* VIEW NAVIGATION WITH RELIABLE STATE-BASED HOVER */}
         <div
-          className="month-buttons-container animate-in"
-          style={{ marginBottom: 16, animationDelay: "0.3s" }}
+          className="animate-in"
+          style={{
+            marginBottom: 16,
+            animationDelay: "0.2s",
+            overflowX: "auto",
+            paddingBottom: 4,
+          }}
         >
           <div
-            className="month-buttons"
             style={{
               display: "flex",
-              gap: 6,
-              flexWrap: "wrap",
+              gap: 8,
+              minWidth: "min-content",
               alignItems: "center",
             }}
           >
             <button
               onClick={() => setView("overall")}
-              style={{
-                background: view === "overall" ? "#5b9bd520" : "#1a1a24",
-                border: `1px solid ${
-                  view === "overall" ? "#5b9bd5" : "#2a2a3a"
-                }`,
-                borderRadius: 6,
-                color: view === "overall" ? "#5b9bd5" : "#666",
-                padding: "5px 13px",
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: "pointer",
-                whiteSpace: "nowrap",
-              }}
+              className={`nav-btn ${view === "overall" ? "active" : ""}`}
             >
               Overall
             </button>
-
             <button
               onClick={() => setView("100x")}
-              style={{
-                background: view === "100x" ? "#ab47bc20" : "#1a1a24",
-                border: `1px solid ${view === "100x" ? "#ab47bc" : "#2a2a3a"}`,
-                borderRadius: 6,
-                color: view === "100x" ? "#ab47bc" : "#666",
-                padding: "5px 13px",
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: "pointer",
-                whiteSpace: "nowrap",
-              }}
+              className={`nav-btn ${view === "100x" ? "active" : ""}`}
             >
               100x Progress
             </button>
-
             <button
               onClick={() => setView("overlay")}
-              style={{
-                background: view === "overlay" ? "#f0a05020" : "#1a1a24",
-                border: `1px solid ${
-                  view === "overlay" ? "#f0a050" : "#2a2a3a"
-                }`,
-                borderRadius: 6,
-                color: view === "overlay" ? "#f0a050" : "#666",
-                padding: "5px 13px",
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: "pointer",
-                whiteSpace: "nowrap",
-              }}
+              className={`nav-btn ${view === "overlay" ? "active" : ""}`}
             >
-              Overlay
+              Month Overlay
             </button>
 
             <div
               style={{
                 width: 1,
-                height: 22,
-                background: "#2a2a3a",
-                margin: "0 4px",
+                height: 24,
+                background: "rgba(255,255,255,0.1)",
+                margin: "0 8px",
               }}
             />
 
             {MONTHS.map((m, i) => {
-              const has = monthsWithData.has(i),
-                active = view === String(i);
-
-              // New Hover Logic
-              const isHovered = highlightedMonth === m;
+              const has = monthsWithData.has(i);
+              const active = view === String(i);
               const stats = allMonthFinals[m];
 
               return (
-                <button
-                  key={m}
-                  onClick={() => has && setView(String(i))}
-                  onMouseEnter={() => setHighlightedMonth(m)}
-                  onMouseLeave={() => setHighlightedMonth(null)}
-                  style={{
-                    background: active ? "#ccc2" : has ? "#1a1a24" : "#141418",
-                    border: `1px solid ${
-                      active ? "#ccc" : has ? "#2a2a3a" : "#1a1a22"
-                    }`,
-                    borderRadius: 6,
-                    color: active ? "#fff" : has ? "#888" : "#333",
-                    padding: "5px 10px",
-                    fontSize: 11.5,
-                    fontWeight: 500,
-                    cursor: has ? "pointer" : "default",
-                    opacity: has ? 1 : 0.4,
-                    position: "relative",
-                    whiteSpace: "nowrap",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                  }}
-                >
-                  {m}
-                  {has && (
-                    <span
+                <div key={m} style={{ position: "relative" }}>
+                  <button
+                    onClick={() => has && setView(String(i))}
+                    onMouseEnter={() =>
+                      has &&
+                      setHoveredMonthStats(stats ? { name: m, ...stats } : null)
+                    }
+                    onMouseLeave={() => setHoveredMonthStats(null)}
+                    disabled={!has}
+                    className={`nav-btn ${active ? "active" : ""}`}
+                    style={{
+                      opacity: has ? 1 : 0.3,
+                      cursor: has ? "pointer" : "default",
+                    }}
+                  >
+                    {m}
+                    {has && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          bottom: -4,
+                          left: "50%",
+                          transform: "translateX(-50%)",
+                          width: 4,
+                          height: 4,
+                          borderRadius: "50%",
+                          background: themeColors.primary,
+                          opacity: 0.6,
+                        }}
+                      />
+                    )}
+                  </button>
+
+                  {/* STATE-BASED TOOLTIP FOR RELIABILITY */}
+                  {hoveredMonthStats && hoveredMonthStats.name === m && (
+                    <div
                       style={{
                         position: "absolute",
-                        top: -3,
-                        right: -3,
-                        width: 6,
-                        height: 6,
-                        borderRadius: "50%",
-                        background: "#4caf7c",
-                      }}
-                    />
-                  )}
-
-                  {/* The Super Slick Hover Effect */}
-                  {has && isHovered && stats && (
-                    <span
-                      className="legend-val"
-                      style={{
-                        color: stats.profit >= 0 ? "#4caf7c" : "#e05555",
-                        fontWeight: 600,
-                        fontSize: 11,
+                        bottom: "135%",
+                        left: "50%",
+                        transform: "translateX(-50%)",
+                        background: "rgba(10, 10, 14, 0.95)",
+                        border: "1px solid rgba(255,255,255,0.15)",
+                        padding: "8px 12px",
+                        borderRadius: 6,
+                        whiteSpace: "nowrap",
+                        zIndex: 100,
+                        pointerEvents: "none",
+                        boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
                       }}
                     >
-                      {privacyMode
-                        ? "****"
-                        : metric === "percent"
-                        ? `${stats.profit >= 0 ? "+" : ""}${fmt(
-                            stats.percent
-                          )}%`
-                        : metric === "profit"
-                        ? `${stats.profit >= 0 ? "+" : ""}$${fmt(stats.profit)}`
-                        : `$${fmt(stats.value)}`}
-                    </span>
+                      <div
+                        style={{
+                          color: "#94a3b8",
+                          fontSize: 10,
+                          fontWeight: 600,
+                          marginBottom: 2,
+                          fontFamily: "'Inter', sans-serif",
+                        }}
+                      >
+                        {m} Summary
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 8,
+                          fontFamily: "'JetBrains Mono', monospace",
+                          fontSize: 11,
+                        }}
+                      >
+                        <span
+                          style={{
+                            color:
+                              hoveredMonthStats.profit >= 0
+                                ? semanticColors.positive
+                                : semanticColors.negative,
+                            fontWeight: 600,
+                          }}
+                        >
+                          {hoveredMonthStats.profit >= 0 ? "+" : ""}$
+                          {fmt(hoveredMonthStats.profit)}
+                        </span>
+                        <span
+                          style={{
+                            color:
+                              hoveredMonthStats.percent >= 0
+                                ? semanticColors.positive
+                                : semanticColors.negative,
+                          }}
+                        >
+                          ({hoveredMonthStats.percent >= 0 ? "+" : ""}
+                          {hoveredMonthStats.percent.toFixed(1)}%)
+                        </span>
+                      </div>
+                    </div>
                   )}
-                </button>
+                </div>
               );
             })}
           </div>
         </div>
 
-        {/* CHART AREA */}
+        {/* CHART CONTAINER */}
         <div
           className="glass-panel animate-in"
           style={{
-            padding: "14px 6px 6px 2px",
-            borderRadius: 12,
-            minHeight: 380,
-            animationDelay: "0.4s",
+            padding: "20px 20px 10px 0",
+            borderRadius: 16,
+            minHeight: 420,
+            animationDelay: "0.3s",
           }}
         >
           {loading ? (
             <div
               style={{
-                height: 340,
+                height: 380,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 flexDirection: "column",
-                gap: 10,
+                gap: 16,
               }}
             >
               <div
                 style={{
-                  width: 40,
-                  height: 40,
+                  width: 50,
+                  height: 50,
                   borderRadius: "50%",
-                  border: "3px solid #333",
-                  borderTopColor: "#5b9bd5",
-                  animation: "spin 0.8s linear infinite",
+                  border: "2px solid rgba(255,255,255,0.1)",
+                  borderTopColor: themeColors.primary,
+                  animation: "spin 1s linear infinite",
                 }}
               />
-              <div style={{ color: "#444", fontSize: 14 }}>Syncing...</div>
-            </div>
-          ) : chartData.length === 0 ? (
-            <div
-              style={{
-                height: 340,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexDirection: "column",
-                gap: 10,
-              }}
-            >
-              <div style={{ color: "#333", fontSize: 40 }}>📈</div>
-              <div style={{ color: "#444", fontSize: 14 }}>
-                Loading data from sheet...
-              </div>
             </div>
           ) : (
             <ResponsiveContainer width="100%" height={380}>
               <ComposedChart
                 data={chartData}
-                margin={{ top: 10, right: 16, left: 8, bottom: 8 }}
+                margin={{ top: 10, right: 20, left: 10, bottom: 0 }}
               >
                 <defs>
                   <linearGradient id="gArea" x1="0" y1="0" x2="0" y2="1">
-                    <stop
-                      offset="0%"
-                      stopColor={areaColor}
-                      stopOpacity={0.35}
-                    />
+                    <stop offset="0%" stopColor={areaColor} stopOpacity={0.4} />
                     <stop
                       offset="100%"
                       stopColor={areaColor}
-                      stopOpacity={0.02}
+                      stopOpacity={0.0}
                     />
                   </linearGradient>
+                  {/* SOFTENED GLOW FILTER */}
+                  <filter
+                    id="glow"
+                    x="-50%"
+                    y="-50%"
+                    width="200%"
+                    height="200%"
+                  >
+                    <feGaussianBlur
+                      in="SourceGraphic"
+                      stdDeviation="12"
+                      result="blur"
+                    />
+                    <feComponentTransfer in="blur" result="softBlur">
+                      <feFuncA type="linear" slope="0.5" />
+                    </feComponentTransfer>
+                    <feMerge>
+                      <feMergeNode in="softBlur" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
                 </defs>
                 <CartesianGrid
                   strokeDasharray="3 3"
-                  stroke="rgba(255,255,255,0.05)"
+                  stroke="rgba(255,255,255,0.04)"
                   vertical={false}
                 />
                 <XAxis
                   dataKey="label"
-                  type="category"
-                  tick={{ fill: "#555", fontSize: 11 }}
-                  axisLine={{ stroke: "#2a2a3a" }}
+                  tick={{
+                    fill: "#64748b",
+                    fontSize: 11,
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}
+                  axisLine={false}
                   tickLine={false}
+                  dy={10}
                   interval={view === "overlay" ? 2 : "preserveStartEnd"}
                 />
                 <YAxis
-                  orientation="left"
                   domain={get100xDomain()}
                   tickFormatter={getAxisTickFormatter}
-                  tick={{ fill: "#888", fontSize: 11 }}
-                  axisLine={{ stroke: "#2a2a3a" }}
+                  tick={{
+                    fill: "#64748b",
+                    fontSize: 11,
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}
+                  axisLine={false}
                   tickLine={false}
-                  width={68}
+                  dx={-10}
                 />
                 <Tooltip
                   content={<CustomTooltip />}
-                  cursor={{ stroke: "#2a2a3a", strokeWidth: 1 }}
+                  cursor={{
+                    stroke: "rgba(255,255,255,0.1)",
+                    strokeWidth: 1,
+                    strokeDasharray: "4 4",
+                  }}
                 />
 
                 {metric !== "value" && view !== "100x" && (
-                  <ReferenceLine y={0} stroke="#444" strokeDasharray="3 3" />
+                  <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 )}
 
                 {view === "overlay" ? (
@@ -1389,21 +1521,24 @@ export default function PortfolioTracker() {
                       const opacity = highlightedMonth
                         ? isHighlighted
                           ? 1
-                          : 0.15
+                          : 0.1
                         : isHidden
                         ? 0
-                        : 1;
+                        : 0.8;
+
                       return (
                         <Line
                           key={m}
                           type="monotone"
                           dataKey={m}
                           stroke={OVERLAY_COLORS[i % OVERLAY_COLORS.length]}
-                          strokeWidth={isHighlighted ? 3 : 2}
+                          strokeWidth={isHighlighted ? 3 : 1.5}
                           strokeOpacity={opacity}
-                          dot={{ r: 3, opacity }}
-                          activeDot={{ r: 5 }}
-                          connectNulls={true}
+                          dot={false}
+                          activeDot={{ r: 6, strokeWidth: 0 }}
+                          connectNulls
+                          animationDuration={1000}
+                          filter="url(#glow)"
                         />
                       );
                     })}
@@ -1415,45 +1550,32 @@ export default function PortfolioTracker() {
                     dataKey="value"
                     stroke={areaColor}
                     strokeWidth={3}
-                    style={{ filter: `drop-shadow(0 0 6px ${areaColor})` }}
                     fill="url(#gArea)"
-                    isAnimationActive={false}
+                    animationDuration={1500}
+                    filter="url(#glow)"
                     dot={(props) => {
                       const isLast = props.index === chartData.length - 1;
-                      if (chartData.length >= 60 && !isLast) return null;
-
-                      const isBaseline = props.payload?.isBaseline;
-
-                      if (isLast) {
-                        return (
+                      if (!isLast)
+                        return <circle cx={props.cx} cy={props.cy} r={0} />;
+                      return (
+                        <g>
+                          <circle
+                            cx={props.cx}
+                            cy={props.cy}
+                            r={10}
+                            fill={areaColor}
+                            opacity={0.2}
+                            style={{ animation: "pulse-soft 2s infinite" }}
+                          />
                           <circle
                             cx={props.cx}
                             cy={props.cy}
                             r={4}
                             fill="#fff"
-                            stroke={areaColor}
-                            style={{
-                              animation: "pulse 2s infinite",
-                              transformBox: "fill-box",
-                              transformOrigin: "center",
-                            }}
                           />
-                        );
-                      }
-
-                      return (
-                        <circle
-                          cx={props.cx}
-                          cy={props.cy}
-                          r={isBaseline ? 3 : 2.5}
-                          fill={isBaseline ? "#666" : areaColor}
-                          stroke={isBaseline ? "#888" : "none"}
-                          strokeWidth={isBaseline ? 1 : 0}
-                          opacity={isBaseline ? 0.6 : 1}
-                        />
+                        </g>
                       );
                     }}
-                    connectNulls
                   />
                 )}
               </ComposedChart>
@@ -1461,30 +1583,32 @@ export default function PortfolioTracker() {
           )}
         </div>
 
-        {/* RECENT ENTRIES LIST */}
+        {/* RECENT ACTIVITY LIST */}
         {sortedEntries.length > 0 && (
           <div
             className="animate-in"
-            style={{ marginTop: 20, animationDelay: "0.5s" }}
+            style={{ marginTop: 30, animationDelay: "0.4s" }}
           >
             <div
               style={{
-                fontSize: 11,
-                color: "#444",
-                marginBottom: 8,
+                fontSize: 12,
+                color: "#94a3b8",
+                marginBottom: 12,
                 fontWeight: 600,
-                letterSpacing: "0.5px",
                 textTransform: "uppercase",
+                letterSpacing: "1px",
               }}
             >
-              Recent Entries{" "}
-              <span style={{ fontWeight: 400, color: "#333" }}>
-                ({sortedEntries.length} total)
-              </span>
+              Recent Ledger
             </div>
             <div
               className="glass-panel"
-              style={{ maxHeight: 180, overflowY: "auto", borderRadius: 8 }}
+              style={{
+                maxHeight: 250,
+                overflowY: "auto",
+                borderRadius: 12,
+                padding: "0 4px",
+              }}
             >
               {[...sortedEntries]
                 .reverse()
@@ -1492,8 +1616,9 @@ export default function PortfolioTracker() {
                 .map((e, i) => {
                   const idx = sortedEntries.findIndex((x) => x.date === e.date);
                   const prev = idx > 0 ? sortedEntries[idx - 1] : null;
-                  const change = prev ? e.balance - prev.balance : null;
-                  const pos = change !== null && change >= 0;
+                  const change = prev ? e.balance - prev.balance : 0;
+                  const isPos = change >= 0;
+
                   return (
                     <div
                       key={e.date}
@@ -1501,9 +1626,8 @@ export default function PortfolioTracker() {
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
-                        padding: "7px 12px",
-                        borderBottom:
-                          i < 19 ? "1px solid rgba(255,255,255,0.05)" : "none",
+                        padding: "12px 16px",
+                        borderBottom: "1px solid rgba(255,255,255,0.03)",
                         transition: "background 0.2s",
                       }}
                       onMouseEnter={(ev) =>
@@ -1515,11 +1639,8 @@ export default function PortfolioTracker() {
                       }
                     >
                       <span
-                        style={{
-                          color: "#666",
-                          fontSize: 12,
-                          fontFamily: "'Courier New',monospace",
-                        }}
+                        className="mono-num"
+                        style={{ color: "#94a3b8", fontSize: 12 }}
                       >
                         {formatDatePretty(e.date)}
                       </span>
@@ -1530,27 +1651,31 @@ export default function PortfolioTracker() {
                           gap: 16,
                         }}
                       >
-                        {change !== null && (
+                        {prev && (
                           <span
+                            className="mono-num"
                             style={{
-                              fontSize: 11,
-                              color: pos ? "#4caf7c" : "#e05555",
+                              fontSize: 12,
+                              color: isPos
+                                ? semanticColors.positive
+                                : semanticColors.negative,
                             }}
                           >
-                            {pos ? "+" : ""}
-                            {privacyMode ? "$ ****" : `$${fmt(change)}`}
+                            {isPos ? "+" : ""}
+                            {privacyMode ? "$****" : `$${fmt(change)}`}
                           </span>
                         )}
                         <span
+                          className="mono-num"
                           style={{
-                            color: "#e8e8e8",
                             fontSize: 13,
                             fontWeight: 600,
-                            minWidth: 90,
+                            color: "#e2e8f0",
+                            minWidth: 80,
                             textAlign: "right",
                           }}
                         >
-                          {privacyMode ? "$ ****" : `$${fmt(e.balance)}`}
+                          {privacyMode ? "$****" : `$${fmt(e.balance)}`}
                         </span>
                       </div>
                     </div>
@@ -1563,6 +1688,3 @@ export default function PortfolioTracker() {
     </div>
   );
 }
-
-//mott
-
